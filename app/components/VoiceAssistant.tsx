@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 //import ChatBubble from "./components/ChatBubble";
 import ChatBubble from "./ChatBubble";
+import { Button } from "@/components/ui/button";
 
 
 
@@ -120,13 +121,18 @@ export default function VoiceAssistant() {
   };
 
   return (
-    <div className="mt-8 text-center space-y-4">
-      <button
+    <div className="bg-gray-50 min-h-screen flex flex-col items-center justify-start p-6 space-y-6">
+      <h1 className="text-4xl font-bold text-gray-900">AI 面试助手</h1>
+      
+      <Button
         onClick={handleClick}
-        className="bg-blue-600 text-white px-6 py-3 rounded-lg text-lg shadow-md hover:bg-blue-700 transition"
+        size="lg"
+        className={`${
+          isRecording ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"
+        } text-white px-8 py-6 rounded-lg text-lg shadow-md transition-colors`}
       >
         🎤 {isRecording ? "正在录音..." : "点击开始说话"}
-      </button>
+      </Button>
 
       {/* 语音识别动画 */}
       {isRecording && (
@@ -137,7 +143,7 @@ export default function VoiceAssistant() {
         </div>
       )}
 
-      <div className="max-w-md w-full mx-auto mt-4 px-4">
+      <div className="max-w-2xl w-full mx-auto space-y-4 px-4">
         {messages.map((msg, idx) => (
           <ChatBubble key={idx} sender={msg.sender} text={msg.text} />
         ))}

@@ -12,7 +12,7 @@ export async function POST(req: Request) {
     const { prompt } = await req.json();
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4',
+      model: 'gpt-3.5-turbo', // ✅ 已改为你当前账号可用的模型
       stream: true,
       messages: [
         {
