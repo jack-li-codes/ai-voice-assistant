@@ -1,11 +1,15 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-//import ChatBubble from "./components/ChatBubble";
 import ChatBubble from "./ChatBubble";
 import { Button } from "@/components/ui/button";
+import { speakWithElevenLabs } from "@/lib/tts";
 
-
+type Message = {
+  sender: "user" | "ai";
+  text: string;
+  isLoading?: boolean;
+};
 
 // @ts-ignore
 const SpeechRecognition =
@@ -14,9 +18,7 @@ const SpeechRecognition =
 
 export default function VoiceAssistant() {
   const [isRecording, setIsRecording] = useState(false);
-  const [messages, setMessages] = useState<
-    { sender: "user" | "ai"; text: string }[]
-  >([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -45,17 +47,14 @@ export default function VoiceAssistant() {
     recognition.onresult = async (event: any) => {
       try {
         const text = event.results[0][0].transcript;
-        console.log('语音识别结果:', text);
+        if (!text) return;
 
-        if (!text) {
-          console.warn('语音识别结果为空');
-          return;
-        }
+        setMessages((prev) => [
+          ...prev,
+          { sender: "user", text },
+          { sender: "ai", text: "", isLoading: true },
+        ]);
 
-        // 添加用户发言
-        setMessages((prev) => [...prev, { sender: "user", text }]);
-
-        // 调用 GPT 接口
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -63,47 +62,27 @@ export default function VoiceAssistant() {
         });
 
         if (!res.ok) {
-          throw new Error(`GPT 接口请求失败: ${res.status} ${res.statusText}`);
+          throw new Error(`GPT 请求失败: ${res.status}`);
         }
 
         const data = await res.text();
-        console.log('GPT 回复:', data);
 
-        if (!data) {
-          console.warn('GPT 回复为空');
-          return;
-        }
+        setMessages((prev) => {
+          const updated = [...prev];
+          const aiIndex = updated.findIndex((m, i) => i === updated.length - 1 && m.sender === "ai" && m.isLoading);
+          if (aiIndex !== -1) {
+            updated[aiIndex] = { sender: "ai", text: data };
+          }
+          return updated;
+        });
 
-        // 添加 AI 回复
-        setMessages((prev) => [...prev, { sender: "ai", text: data }]);
-
-        // 语音播放回复
-        const synth = window.speechSynthesis;
-        const utterance = new SpeechSynthesisUtterance(data);
-        utterance.lang = "zh-CN";
-        
-        // 确保语音合成可用
-        if (synth.speaking) {
-          console.log('正在播放语音，等待完成...');
-          synth.cancel();
-        }
-
-        utterance.onend = () => {
-          console.log('语音播放完成');
-        };
-
-        utterance.onerror = (event) => {
-          console.error('语音播放出错:', event);
-        };
-
-        synth.speak(utterance);
+        await speakWithElevenLabs(data);
       } catch (error) {
-        console.error('处理语音识别结果时出错:', error);
-        // 添加错误提示到消息列表
-        setMessages((prev) => [...prev, { 
-          sender: "ai", 
-          text: "抱歉，处理您的请求时出现了问题，请稍后再试。" 
-        }]);
+        console.error("出错:", error);
+        setMessages((prev) => [
+          ...prev.filter((m) => !m.isLoading),
+          { sender: "ai", text: "抱歉，AI 暂时无法回答，请稍后再试。" },
+        ]);
       }
     };
 
@@ -123,18 +102,17 @@ export default function VoiceAssistant() {
   return (
     <div className="bg-gray-50 min-h-screen flex flex-col items-center justify-start p-6 space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">AI 面试助手</h1>
-      
+
       <Button
         onClick={handleClick}
         size="lg"
-        className={`${
+        className={`$${
           isRecording ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"
         } text-white px-8 py-6 rounded-lg text-lg shadow-md transition-colors`}
       >
         🎤 {isRecording ? "正在录音..." : "点击开始说话"}
       </Button>
 
-      {/* 语音识别动画 */}
       {isRecording && (
         <div className="flex justify-center space-x-2">
           <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -145,7 +123,7 @@ export default function VoiceAssistant() {
 
       <div className="max-w-2xl w-full mx-auto space-y-4 px-4">
         {messages.map((msg, idx) => (
-          <ChatBubble key={idx} sender={msg.sender} text={msg.text} />
+          <ChatBubble key={idx} sender={msg.sender} text={msg.text} isLoading={msg.isLoading} />
         ))}
         <div ref={messagesEndRef} />
       </div>
