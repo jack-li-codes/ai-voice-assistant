@@ -1,64 +1,36 @@
-# 🎙️ 智能 AI 面试助手（AI Voice Interview Assistant）
+# 🤖 AI Voice Assistant – 智能语音秘书
 
-一个基于 Next.js、OpenAI GPT-4 和 ElevenLabs 的语音交互式 AI 面试助手。  
-支持语音识别、自然语言对话、语音朗读、多轮问答、多语言扩展等能力，未来可用于模拟电话面试、安排空闲时间、对接真实客服系统等应用场景。
-
----
-
-## 🚀 项目亮点
-
-- 🤖 使用 GPT-4 实现语义理解与自然语言对话
-- 🎤 浏览器语音识别（SpeechRecognition）
-- 🗣️ 使用 ElevenLabs 合成自然语音（支持中英双语）
-- 💬 GPT 回复实时流式展示
-- 🌀 语音识别中动画加载（待办）
-- 🧠 可扩展多轮问答、时间管理、电话交互等功能
+一个基于 OpenAI 与语音合成技术的智能语音助手，  
+可根据用户输入的中文指令，自动模拟英文语音通话，替用户拨打电话与 HR、客服等进行沟通。
 
 ---
 
-## 🧱 技术栈
+## 🧠 项目功能
 
-- [Next.js 14](https://nextjs.org/)（App Router）
-- TypeScript + TailwindCSS
-- OpenAI GPT API + Streaming
-- ElevenLabs 语音合成
-- 浏览器端 SpeechRecognition + Audio 播放
-
----
-
-## 🗂️ 项目结构与开发规范（Cursor 请严格遵守）
-
-- 所有 GPT 请求必须通过 `/api/chat` 实现，使用 `StreamingTextResponse` 返回
-- GPT 请求封装必须在 `openai.chat.completions.create` 内
-- OpenAI Key 不能暴露在前端
-- 所有语音功能封装在 `VoiceAssistant.tsx`
-- 禁止将业务逻辑写在 `page.tsx` 页面文件内部
+- 🗣️ 支持中文指令输入（例如“帮我改面试时间”）
+- 🤖 调用 GPT API 模拟人类身份生成英文通话内容
+- 🔊 使用 ElevenLabs 进行自然语音合成
+- 🎙️ 支持语音识别（转录用户语音）
+- 📝 显示完整通话内容并支持多轮追踪
+- 📅 可根据预设日程调整面试、预约时间
+- 🔌 模块化设计，支持扩展更多通话场景（HR、快递、政府、客服…）
 
 ---
 
-## 🔒 安全与依赖控制
-
-- 不允许在前端直接调用 OpenAI
-- 避免引入大型第三方库（如 lodash、moment）
-- `.env.local` 已加入 `.gitignore`
-
----
-
-## 📅 开发任务计划
-
-| 编号 | 功能                          | 状态       |
-|------|-------------------------------|------------|
-| 242  | 接入 OpenAI GPT API           | ✅ 已完成  |
-| 243  | 展示对话记录（问答气泡 UI）   | 🔜 进行中  |
-| 244  | 加入语音识别中动画             | ⏳ 待办     |
-| 245  | 支持多轮语音对话               | ⏳ 待办     |
-| 246  | 可配置面试空闲时间表           | ⏳ 待办     |
-| 247  | 与电话系统打通（模拟预约等）   | ⏳ 待办     |
-
----
-
-## 🧪 快速本地运行
+## 📁 项目结构概览
 
 ```bash
-npm install
-npm run dev
+ai-voice-assistant/
+├── pages/                  # Next.js 页面
+├── components/             # 前端组件（转录显示、按钮、加载动画等）
+├── lib/                    # OpenAI & ElevenLabs 接口封装
+├── ai-calls/               # ✅ 核心模块：AI 模拟打电话逻辑
+│   ├── scheduler.ts              # 用户日程匹配逻辑
+│   ├── callPromptBuilder.ts     # 构建 GPT Prompt
+│   ├── callAgent.ts             # 封装 GPT 对话逻辑
+│   └── templates/
+│       └── rescheduleInterview.ts  # 改面试时间任务模板
+├── public/                 # 静态资源
+├── .env.local              # 环境变量（需配置 API 密钥）
+├── README.md               # 本文件
+├── README_FOR_CURSOR.md    # ✅ 给 Cursor 的开发指令（勿删）

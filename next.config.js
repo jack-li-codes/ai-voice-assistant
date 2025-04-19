@@ -1,6 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  /* config options here */
+  reactStrictMode: true,
+  env: {
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    OPENAI_ORG_ID: process.env.OPENAI_ORG_ID,
+  },
 };
 
 module.exports = nextConfig; 

@@ -1,132 +1,61 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import ChatBubble from "./ChatBubble";
-import { Button } from "@/components/ui/button";
-import { speakWithElevenLabs } from "@/lib/tts";
-
-type Message = {
-  sender: "user" | "ai";
-  text: string;
-  isLoading?: boolean;
-};
-
-// @ts-ignore
-const SpeechRecognition =
-  typeof window !== "undefined" &&
-  ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+import React, { useState } from "react";
+import { handleCustomTask } from "@/ai-calls/handleCustomTask";
 
 export default function VoiceAssistant() {
-  const [isRecording, setIsRecording] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [customInstruction, setCustomInstruction] = useState("");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [callHistory, setCallHistory] = useState<string[]>([]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  const handleSimulateCall = async () => {
+    if (!customInstruction.trim()) return;
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  const handleClick = () => {
-    if (!SpeechRecognition) {
-      alert("你的浏览器不支持语音识别，请使用 Chrome 浏览器");
-      return;
+    try {
+      setIsProcessing(true);
+      const content = await handleCustomTask(customInstruction);
+      setCallHistory((prev) => [content, ...prev.slice(0, 4)]); // 最多保留5条
+      setCustomInstruction("");
+    } catch (error) {
+      console.error("❌ 通话失败:", error);
+    } finally {
+      setIsProcessing(false);
     }
-
-    const recognition = new SpeechRecognition();
-    recognition.lang = "zh-CN";
-    recognition.continuous = false;
-    recognition.interimResults = false;
-
-    recognition.onstart = () => {
-      setIsRecording(true);
-    };
-
-    recognition.onresult = async (event: any) => {
-      try {
-        const text = event.results[0][0].transcript;
-        if (!text) return;
-
-        setMessages((prev) => [
-          ...prev,
-          { sender: "user", text },
-          { sender: "ai", text: "", isLoading: true },
-        ]);
-
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: text }),
-        });
-
-        if (!res.ok) {
-          throw new Error(`GPT 请求失败: ${res.status}`);
-        }
-
-        const data = await res.text();
-
-        setMessages((prev) => {
-          const updated = [...prev];
-          const aiIndex = updated.findIndex((m, i) => i === updated.length - 1 && m.sender === "ai" && m.isLoading);
-          if (aiIndex !== -1) {
-            updated[aiIndex] = { sender: "ai", text: data };
-          }
-          return updated;
-        });
-
-        await speakWithElevenLabs(data);
-      } catch (error) {
-        console.error("出错:", error);
-        setMessages((prev) => [
-          ...prev.filter((m) => !m.isLoading),
-          { sender: "ai", text: "抱歉，AI 暂时无法回答，请稍后再试。" },
-        ]);
-      }
-    };
-
-    recognition.onerror = (event: any) => {
-      console.error("语音识别出错:", event.error);
-      alert("语音识别出错：" + event.error);
-      setIsRecording(false);
-    };
-
-    recognition.onend = () => {
-      setIsRecording(false);
-    };
-
-    recognition.start();
   };
 
   return (
-    <div className="bg-gray-50 min-h-screen flex flex-col items-center justify-start p-6 space-y-6">
-      <h1 className="text-4xl font-bold text-gray-900">AI 面试助手</h1>
+    <div className="max-w-xl mx-auto p-6 bg-white shadow-md rounded-xl">
+      <h1 className="text-2xl font-bold text-center text-gray-800 mb-4">AI 语音助手</h1>
 
-      <Button
-        onClick={handleClick}
-        size="lg"
-        className={`$${
-          isRecording ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"
-        } text-white px-8 py-6 rounded-lg text-lg shadow-md transition-colors`}
+      <label className="block text-sm font-medium text-gray-700 mb-1">任务说明</label>
+      <textarea
+        className="w-full rounded-md border-gray-300 shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+        rows={4}
+        placeholder="请输入您想让 AI 执行的任务说明..."
+        value={customInstruction}
+        onChange={(e) => setCustomInstruction(e.target.value)}
+      />
+
+      <button
+        onClick={handleSimulateCall}
+        disabled={isProcessing}
+        className="mt-4 w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
       >
-        🎤 {isRecording ? "正在录音..." : "点击开始说话"}
-      </Button>
+        {isProcessing ? "处理中..." : "开始通话"}
+      </button>
 
-      {isRecording && (
-        <div className="flex justify-center space-x-2">
-          <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-          <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-          <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+      {callHistory.length > 0 && (
+        <div className="mt-6">
+          <h2 className="text-sm font-semibold text-gray-700 mb-2">历史记录</h2>
+          <ul className="space-y-2 text-sm text-gray-600">
+            {callHistory.map((entry, index) => (
+              <li key={index} className="p-2 rounded-md bg-gray-50 border border-gray-200">
+                {entry}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
-
-      <div className="max-w-2xl w-full mx-auto space-y-4 px-4">
-        {messages.map((msg, idx) => (
-          <ChatBubble key={idx} sender={msg.sender} text={msg.text} isLoading={msg.isLoading} />
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
     </div>
   );
 }
