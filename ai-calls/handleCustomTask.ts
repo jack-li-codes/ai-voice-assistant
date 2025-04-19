@@ -1,28 +1,24 @@
 // ai-calls/handleCustomTask.ts
-
 import { speakWithElevenLabs } from "@/lib/tts";
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 const OPENAI_ORG_ID = process.env.OPENAI_ORG_ID!;
-console.log("🔑 OPENAI_API_KEY:", OPENAI_API_KEY);
-console.log("🏢 OPENAI_ORG_ID:", OPENAI_ORG_ID);
+const GPT_MODEL = "gpt-4";
 
-const GPT_MODEL = "gpt-4"; // You can change this to your preferred model
+// 存储上下文（可换成状态管理）
+let messages: { role: "system" | "user" | "assistant"; content: string }[] = [
+  {
+    role: "system",
+    content:
+      "You are an AI assistant pretending to be Lucy, a patient talking to a doctor. Answer naturally and briefly.",
+  },
+];
 
-export async function handleCustomTask(customInstruction: string): Promise<string> {
-  const messages = [
-    {
-      role: "system",
-      content: "You are an AI assistant making a phone call in English. Be professional and concise.",
-    },
-    {
-      role: "user",
-      content: customInstruction,
-    },
-  ];
+export async function handleCustomTask(doctorSays: string): Promise<string> {
+  messages.push({ role: "user", content: doctorSays });
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -36,18 +32,20 @@ export async function handleCustomTask(customInstruction: string): Promise<strin
       }),
     });
 
-    const data = await response.json();
+    const data = await res.json();
 
-    if (!response.ok) {
-      console.error("❌ GPT request failed:", data);
-      throw new Error("Failed to generate call content");
+    if (!res.ok) {
+      console.error("❌ GPT请求失败：", data);
+      throw new Error("生成通话内容失败");
     }
 
-    const content = data.choices?.[0]?.message?.content?.trim() || "⚠️ No content returned";
-    await speakWithElevenLabs(content);
-    return content;
-  } catch (error) {
-    console.error("❌ Call failed:", error);
-    throw error;
+    const reply = data.choices?.[0]?.message?.content?.trim() || "⚠️ 无内容返回";
+    messages.push({ role: "assistant", content: reply });
+
+    // await speakWithElevenLabs(reply);  // 注释掉这里的调用，因为 VoiceAssistant.tsx 中已经调用了
+    return reply;
+  } catch (err) {
+    console.error("❌ 通话失败:", err);
+    throw err;
   }
 }

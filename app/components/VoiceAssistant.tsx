@@ -1,61 +1,81 @@
 "use client";
 
-import React, { useState } from "react";
+import { useState } from "react";
 import { handleCustomTask } from "@/ai-calls/handleCustomTask";
+import { speakWithElevenLabs } from "@/lib/tts";
 
 export default function VoiceAssistant() {
-  const [customInstruction, setCustomInstruction] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [callHistory, setCallHistory] = useState<string[]>([]);
+  const [background, setBackground] = useState("");
+  const [taskInput, setTaskInput] = useState("");
+  const [speakerRole, setSpeakerRole] = useState("");
+  const [messages, setMessages] = useState<{ role: "user" | "ai"; text: string }[]>([]);
 
   const handleSimulateCall = async () => {
-    if (!customInstruction.trim()) return;
+    if (!background.trim() || !taskInput.trim() || !speakerRole.trim()) return;
 
-    try {
-      setIsProcessing(true);
-      const content = await handleCustomTask(customInstruction);
-      setCallHistory((prev) => [content, ...prev.slice(0, 4)]); // 最多保留5条
-      setCustomInstruction("");
-    } catch (error) {
-      console.error("❌ 通话失败:", error);
-    } finally {
-      setIsProcessing(false);
-    }
+    const userMsg = { role: "user" as const, text: `${speakerRole}说：${taskInput}` };
+    setMessages((prev) => [...prev, userMsg]);
+
+    const contextPrompt = `你是一个 AI 秘书。当前场景如下：${background}。用户正在与 ${speakerRole} 对话。
+对方刚刚说：「${taskInput}」。请根据上下文自然回应。`;
+
+    const openingLine = await handleCustomTask(contextPrompt);
+    await speakWithElevenLabs(openingLine);
+    setMessages((prev) => [...prev, { role: "ai", text: openingLine }]);
+
+    setTaskInput("");
   };
 
   return (
-    <div className="max-w-xl mx-auto p-6 bg-white shadow-md rounded-xl">
-      <h1 className="text-2xl font-bold text-center text-gray-800 mb-4">AI 语音助手</h1>
+    <div className="space-y-4">
+      <div>
+        <label className="block text-sm font-medium mb-1">背景信息</label>
+        <textarea
+          className="w-full border rounded p-2"
+          rows={3}
+          value={background}
+          onChange={(e) => setBackground(e.target.value)}
+          placeholder="请输入完整背景，例如用户正在办理开户，医生是第一次见面..."
+        />
+      </div>
 
-      <label className="block text-sm font-medium text-gray-700 mb-1">任务说明</label>
-      <textarea
-        className="w-full rounded-md border-gray-300 shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-        rows={4}
-        placeholder="请输入您想让 AI 执行的任务说明..."
-        value={customInstruction}
-        onChange={(e) => setCustomInstruction(e.target.value)}
-      />
+      <div>
+        <label className="block text-sm font-medium mb-1">对方是谁（医生 / 老师 / 银行人员...）</label>
+        <input
+          type="text"
+          className="w-full border rounded px-2 py-1"
+          value={speakerRole}
+          onChange={(e) => setSpeakerRole(e.target.value)}
+          placeholder="请输入场景身份，例如医生"
+        />
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium mb-1">对方说了什么</label>
+        <textarea
+          className="w-full border rounded p-2"
+          rows={3}
+          value={taskInput}
+          onChange={(e) => setTaskInput(e.target.value)}
+          placeholder="请输入一句对方说的话..."
+        />
+      </div>
 
       <button
         onClick={handleSimulateCall}
-        disabled={isProcessing}
-        className="mt-4 w-full rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+        className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
       >
-        {isProcessing ? "处理中..." : "开始通话"}
+        AI 回复一句
       </button>
 
-      {callHistory.length > 0 && (
-        <div className="mt-6">
-          <h2 className="text-sm font-semibold text-gray-700 mb-2">历史记录</h2>
-          <ul className="space-y-2 text-sm text-gray-600">
-            {callHistory.map((entry, index) => (
-              <li key={index} className="p-2 rounded-md bg-gray-50 border border-gray-200">
-                {entry}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <div className="mt-6 space-y-2">
+        <h2 className="font-semibold">历史记录</h2>
+        {messages.map((msg, index) => (
+          <div key={index} className="text-left">
+            <span className="font-semibold">{msg.role === "ai" ? "🤖 AI" : "👤 对方"}：</span> {msg.text}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
