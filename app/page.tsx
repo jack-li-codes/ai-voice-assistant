@@ -1,15 +1,17 @@
-"use client";
+'use client';
 
-import VoiceAssistant from "./components/VoiceAssistant";
+import LiveConversation from '@/app/components/LiveConversation';
 
 export default function Home() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-4 bg-gray-50 text-gray-900">
-      <h1 className="text-3xl font-bold mb-6">AI 语音助手</h1>
-      <div className="bg-white p-6 rounded-xl shadow-md w-full max-w-md text-center">
-        {/* 渲染新版多场景助手 UI */}
-        <VoiceAssistant />
-      </div>
+    <main className="min-h-screen bg-white text-black p-6 space-y-4">
+      <h1 className="text-2xl font-bold text-blue-700">AI秘书语音对话测试</h1>
+
+      <p className="text-gray-700">
+        请点击“开始对话”，对方可以直接说话（中英文皆可），AI 会自动帮你理解并用英文代替你自然回应。
+      </p>
+
+      <LiveConversation />
     </main>
   );
 }
