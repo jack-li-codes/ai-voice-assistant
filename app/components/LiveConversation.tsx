@@ -1,176 +1,518 @@
-// ✅ 最终稳定修复版 LiveConversation.tsx（已解决识别器无法重启 + 多轮识别不生效问题）
+"use client";
 
-'use client';
-
-import { useEffect, useRef, useState } from 'react';
-import { getAIResponse } from '@/lib/gpt/getAIResponse';
-import { speakWithElevenLabs } from '@/lib/voice/speakWithElevenLabs';
+import { useEffect, useRef, useState } from "react";
+import { getAIResponse } from "@/lib/gpt/getAIResponse";
+import { speakWithElevenLabs } from "@/lib/voice/speakWithElevenLabs";
+import ManualInputBox from "./ManualInputBox";
 
 declare global {
   interface Window {
-    webkitSpeechRecognition: any;
-    SpeechRecognition: any;
+    webkitSpeechRecognition: new () => SpeechRecognition;
+    SpeechRecognition: new () => SpeechRecognition;
+  }
+  interface SpeechRecognition {
+    lang: string;
+    continuous: boolean;
+    interimResults: boolean;
+    start: () => void;
+    stop: () => void;
+    onresult: ((ev: SpeechRecognitionEvent) => any) | null;
+    onend: ((ev: Event) => any) | null;
+    onerror: ((ev: any) => any) | null;
   }
   interface SpeechRecognitionEvent extends Event {
     results: SpeechRecognitionResultList;
   }
 }
 
+/* ===================== Utils ===================== */
+const hasCJK = (s: string) => /[\u3400-\u9FFF\uF900-\uFAFF]/.test(s);
+const pickASRLang = (hint: string) => (hasCJK(hint) ? "zh-CN" : "en-US");
+const isGreeting = (t: string) =>
+  /^(hi|hello|hey|how are you|哈(啰|罗)|你好)\b/i.test(t);
+
+/** 从 GUIDE 中提取“我的名字”（可英文/中文），找不到就 null */
+function extractNameFromGuide(guide: string): string | null {
+  if (!guide) return null;
+  const head = guide.split(/\r?\n/).slice(0, 60).join("\n");
+  const patterns = [
+    /my\s+name\s+is\s+([A-Z][a-zA-Z\-]+)/i,
+    /i\s+am\s+([A-Z][a-zA-Z\-]+)/i,
+    /name[:：]\s*([A-Z][a-zA-Z\-]+)/i,
+    /你叫[:：]?\s*([A-Za-z\u4e00-\u9fa5]+)/i,
+    /我是[:：]?\s*([A-Za-z\u4e00-\u9fa5]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = head.match(re);
+    if (m?.[1]) return m[1].trim();
+  }
+  return null;
+}
+
+/** 估算播报时长（毫秒）：每秒 ~2.2 词 + 300ms 余量 */
+const estimateTtsMs = (text: string) => {
+  const words = (text || "").trim().split(/\s+/).filter(Boolean).length;
+  const ms = (words / 2.2) * 1000 + 300;
+  return Math.max(800, Math.min(ms, 15000));
+};
+
+/** 只播英文：去掉手动输入回显 & 中文行 */
+function sanitizeForTTS(reply: string, recentManuals: string[]) {
+  let out = reply || "";
+  for (const m of recentManuals) {
+    const mm = (m || "").trim();
+    if (mm.length >= 6 && out.includes(mm)) out = out.split(mm).join("");
+  }
+  if (hasCJK(out)) {
+    out = out
+      .split("\n")
+      .filter((line) => !hasCJK(line))
+      .join("\n")
+      .trim();
+  }
+  return out || "Noted.";
+}
+
+/** —— 文本相似度（回声过滤） —— */
+const normalize = (s: string) =>
+  s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+
+const DROP = new Set([
+  "a","an","the","to","and","of","for","on","in","at","by","that","this","it","is","are","was","were",
+  "be","am","been","do","does","did","with","from","as","so","but","or","if","then","than","have","has","had",
+  "i","you","we","they","he","she","my","your","our","their","me","us","him","her"
+]);
+
+const tokenSet = (s: string) => {
+  const ts = normalize(s).split(" ").filter((x) => !!x);
+  const set = new Set<string>();
+  for (const t of ts) if (!DROP.has(t)) set.add(t);
+  return set;
+};
+
+const jaccard = (setA: Set<string>, setB: Set<string>) => {
+  let inter = 0;
+  setA.forEach((token) => {
+    if (setB.has(token)) inter++;
+  });
+  const union = setA.size + setB.size - inter;
+  return union ? inter / union : 0;
+};
+
+
+function isEchoOfAI(partnerText: string, recentAI: string[], threshold = 0.55) {
+  const a = tokenSet(partnerText);
+  if (a.size < 3) return false;
+  for (const r of recentAI) {
+    const b = tokenSet(r);
+    const sim = jaccard(a, b);
+    if (sim >= threshold) return true;
+  }
+  return false;
+}
+
+/** 是否把我叫错（根据动态 myName） */
+function detectMisname(text: string, myName: string) {
+  const name = (myName || "").trim();
+  if (!name) return false;
+  if (new RegExp(`\\b${name}\\b`, "i").test(text)) return false; // 已叫对
+  if (/\b(hi|hello|hey)[, ]+([A-Za-z\u4e00-\u9fa5]+)\b/i.test(text)) return true;
+  return false;
+}
+
+/* ===================== Component ===================== */
 export default function LiveConversation() {
-  const [mode, setMode] = useState('face-to-face');
-  const [background, setBackground] = useState('');
-  const [speakerRole, setSpeakerRole] = useState('');
+  // —— 表单 —— //
+  const [mode, setMode] = useState("face-to-face");
+  const [background, setBackground] = useState("");
+  const [speakerRole, setSpeakerRole] = useState("");
+
+  // 动态身份
+  const [myName, setMyName] = useState("Lucy"); // 默认值，随时可改
+  const [autoNameFromGuide, setAutoNameFromGuide] = useState(true);
+
+  // 外放防回声模式（打/接电话建议开启）
+  const [speakerMode, setSpeakerMode] = useState(true);
+
+  // —— 对话与控制 —— //
   const [conversation, setConversation] = useState<string[]>([]);
   const [isActive, setIsActive] = useState(false);
-  const recognitionRef = useRef<any>(null);
+
+  // 识别/播报控制
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const isSpeakingRef = useRef(false);
+  const correctedOnceRef = useRef(false);
+  const manualInputsRef = useRef<string[]>([]);
+  const lastResultAtRef = useRef<number>(0);
+  const heartbeatTimerRef = useRef<number | null>(null);
 
-  // 初始化识别器
-  const createNewRecognition = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'zh-CN';
-    recognition.interimResults = false;
-    recognition.continuous = true;
-    return recognition;
-  };
+  // 回声过滤：记录最近 3 条 AI 回复
+  const recentAIRef = useRef<string[]>([]);
 
-  const restartRecognition = () => {
-    const newRecog = createNewRecognition();
+  // 只处理最终结果；防重复
+  const lastFinalTextRef = useRef<string>("");
 
-    newRecog.onstart = () => console.log('✅ recognition.onstart 被触发，监听已开启');
+  // 播报后忽略窗口：重启识别后的一小段时间内丢弃任何结果
+  const listeningResumedAtRef = useRef<number>(0);
+  const markListeningResumed = () => { listeningResumedAtRef.current = Date.now(); };
 
-    newRecog.onresult = async (event: SpeechRecognitionEvent) => {
-      if (isSpeakingRef.current || !isActive) return;
-      const userText = event.results[event.results.length - 1][0].transcript;
-      setConversation((prev) => [...prev, `🧑 对方: ${userText}`]);
+  // 根据 GUIDE 自动更新名字（可关闭）
+  useEffect(() => {
+    if (!autoNameFromGuide) return;
+    const n = extractNameFromGuide(background);
+    if (n && n !== myName) setMyName(n);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [background, autoNameFromGuide]);
 
-      const systemPrompt = `
-你是James的爸爸，请以他的身份用自然流畅、专业礼貌的英文回答医生的问题。不要解释你是谁，不要提及AI或秘书。请始终参考以下背景信息后再作答：
+  /* 识别器 */
+  const ensureRecognition = () => {
+    if (recognitionRef.current) return recognitionRef.current;
 
-🎯 背景说明:
-- 当前沟通模式: ${mode}
-- 对方身份: ${speakerRole}
-- 场景背景: ${background}
+    const SR: any = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      console.error("This browser does not support Web Speech API.");
+      return null;
+    }
 
-💬 医生刚才说: ${userText}
+    const recog: SpeechRecognition = new SR();
+    recog.lang = "en-US";        // 初始固定英文
+    recog.interimResults = true; // 允许中间结果，但我们只吃 isFinal
+    recog.continuous = true;
 
-🧠 你的任务:
-- 只代表James的爸爸回答。
-- 用清晰、真实、简洁的英文表达。
-- 不要重复背景信息，不要解释身份。
-- 回应医生刚刚那句话，不要一次说太多。
-      `;
+    recog.onresult = async (event: SpeechRecognitionEvent) => {
+      if (!isActive) return;
+      if (isSpeakingRef.current) return;
 
-      const reply = await getAIResponse(systemPrompt);
-      setConversation((prev) => [...prev, `🤖 AI: ${reply}`]);
+      // 播报刚结束后的忽略窗口（外放稍长）
+      const IGNORE_WINDOW_MS = speakerMode ? 1800 : 1200;
+      if (Date.now() - listeningResumedAtRef.current < IGNORE_WINDOW_MS) return;
 
-      if (recognitionRef.current) recognitionRef.current.stop();
-      isSpeakingRef.current = true;
-      console.log('🗣 开始播放语音...');
+      lastResultAtRef.current = Date.now();
 
-      try {
-        await speakWithElevenLabs(reply);
-        console.log('✅ 语音播放成功');
-      } catch (error) {
-        console.error('❌ 语音播放失败:', error);
-      } finally {
-        isSpeakingRef.current = false;
-        console.log('✅ isSpeakingRef 重置为 false，准备重启识别器');
-        restartRecognition();
-        recognitionRef.current.start();
-      }
-    };
-
-    newRecog.onerror = (event: any) => {
-      console.error('❌ recognition.onerror:', event.error);
-    };
-
-    newRecog.onend = () => {
-      console.log('📣 onend 被动触发，isActive:', isActive, '| isSpeakingRef:', isSpeakingRef.current);
-      if (isActive && !isSpeakingRef.current) {
-        try {
-          newRecog.start();
-          console.log('✅ 被动重启识别成功');
-        } catch (err) {
-          console.error('❌ 被动识别重启失败:', err);
+      // 取最后一个 isFinal=true 的结果
+      let finalText = "";
+      for (let i = event.results.length - 1; i >= 0; i--) {
+        const res: any = event.results[i];
+        if (res.isFinal) {
+          finalText = res[0]?.transcript?.trim?.() || "";
+          break;
         }
       }
+      if (!finalText) return;
+
+      // 只基于当前文本切语言（含中文才切中文）
+      const want = pickASRLang(finalText);
+      if (recog.lang !== want) {
+        try { recog.stop(); } catch {}
+        recog.lang = want;
+        try { recog.start(); markListeningResumed(); } catch {}
+      }
+
+      // 去重：和上次“最终文本”几乎一致就丢弃
+      const lastFinal = lastFinalTextRef.current;
+      const almostSame =
+        finalText === lastFinal ||
+        (finalText.length > 5 &&
+          lastFinal.length > 5 &&
+          (finalText.startsWith(lastFinal) || lastFinal.startsWith(finalText)));
+      if (almostSame) return;
+      lastFinalTextRef.current = finalText;
+
+      // 回声过滤：与最近 AI 回复高度相似 -> 丢弃
+      const echoThreshold = speakerMode ? 0.50 : 0.55;
+      if (isEchoOfAI(finalText, recentAIRef.current, echoThreshold)) {
+        return;
+      }
+
+      setConversation((prev) => [...prev, `🧑 Partner: ${finalText}`]);
+
+      // —— 名字误叫，仅纠一次 —— //
+      const mustCorrectOnce = detectMisname(finalText, myName) && !correctedOnceRef.current;
+
+      // —— 轻量上下文 —— //
+      const recent = conversation.slice(-4).join("\n") || "(none)";
+
+      // —— 系统提示（动态身份 + 英文） —— //
+      const persona = (myName || "Speaker").trim();
+      const systemMessage = `
+You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
+Your persona name is "${persona}". NEVER claim to be anyone else.
+If the partner misnames you, correct ONCE with: "Hi — this is ${persona}." then continue.
+Do NOT reveal you are an assistant. Be natural, concise, professional (1–3 sentences).
+Avoid repeating the same point; move the conversation forward with one crisp question or update.
+Never echo my manual notes verbatim; paraphrase naturally.
+
+GUIDE (verbatim if present):
+${background ? `"""\n${background}\n"""` : "(empty)"}
+
+Context:
+- Mode: ${mode || "N/A"}
+- Counterparty: ${speakerRole || "N/A"}
+`.trim();
+
+      const userMessage = `
+Recent lines:
+${recent}
+
+New partner line:
+${finalText}
+
+Task:
+1) Reply in ENGLISH only, first-person as ${persona}, 1–3 sentences.
+2) If this line is another greeting, transition to ONE concrete topic rather than repeating greetings.
+3) Paraphrase; do not mirror the user's words.
+`.trim();
+
+      let finalUserMessage = userMessage;
+      if (mustCorrectOnce) {
+        finalUserMessage += `\nAlso: Begin with exactly: "Hi — this is ${persona}." once, then continue.`;
+      }
+
+      try {
+        const reply = await getAIResponse({ systemMessage, userMessage: finalUserMessage });
+
+        // 记录最近 3 条 AI 回复，供回声过滤
+        recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
+
+        setConversation((prev) => [...prev, `🤖 AI: ${reply}`]);
+
+        // —— 播报窗口锁定（外放多加缓冲） —— //
+        const recog2 = recognitionRef.current;
+        const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+        const speakMs = estimateTtsMs(safeReply);
+        const extra = speakerMode ? 700 : 300;
+        isSpeakingRef.current = true;
+        try { recog2?.stop(); } catch {}
+        await speakWithElevenLabs(safeReply);
+        await new Promise((r) => setTimeout(r, speakMs + extra));
+      } catch (e) {
+        console.error("❌ generate/speak error:", e);
+      } finally {
+        isSpeakingRef.current = false;
+        try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
+      }
+
+      if (mustCorrectOnce) correctedOnceRef.current = true;
     };
 
-    recognitionRef.current = newRecog;
+    recog.onerror = (e: any) => {
+      console.error("recognition.onerror:", e?.error || e);
+    };
+
+    recog.onend = () => {
+      if (isActive && !isSpeakingRef.current) {
+        try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
+      }
+    };
+
+    recognitionRef.current = recog;
+    return recog;
   };
 
+  const safeStart = () => { try { ensureRecognition()?.start(); markListeningResumed(); } catch {} };
+  const safeStop = () => { try { recognitionRef.current?.stop(); } catch {} };
+  const destroyRecognition = () => {
+    try {
+      if (recognitionRef.current) {
+        (recognitionRef.current as any).onresult = null;
+        (recognitionRef.current as any).onend = null;
+        (recognitionRef.current as any).onerror = null;
+        try { recognitionRef.current.stop(); } catch {}
+      }
+    } finally { recognitionRef.current = null; }
+  };
+
+  // mic 权限 + 回声/降噪（外放也有帮助）
   useEffect(() => {
-    navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then(() => console.log('🎤 麦克风权限已获取'))
-      .catch(() => alert('❌ 获取麦克风失败，请检查权限'));
+    navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false } as any
+    })
+      .then(() => console.log("🎤 mic granted"))
+      .catch(() => alert("❌ Microphone permission denied"));
   }, []);
 
+  // 心跳兜底：20s 无结果 -> 强制重启并切回英文
   useEffect(() => {
-    if (isActive) {
-      restartRecognition();
-      try {
-        recognitionRef.current?.start();
-        console.log('🎧 正在启动识别...');
-      } catch (error) {
-        console.error('❌ 启动识别失败:', error);
+    if (!isActive) return;
+    lastResultAtRef.current = Date.now();
+    heartbeatTimerRef.current = window.setInterval(() => {
+      if (!isActive) return;
+      const idleMs = Date.now() - lastResultAtRef.current;
+      if (idleMs > 20000 && !isSpeakingRef.current) {
+        try { recognitionRef.current?.stop(); } catch {}
+        try {
+          if (recognitionRef.current) (recognitionRef.current as any).lang = "en-US";
+          recognitionRef.current?.start();
+          markListeningResumed();
+        } catch {}
       }
-    } else {
-      recognitionRef.current?.stop();
-    }
+    }, 5000) as unknown as number;
+
+    return () => {
+      if (heartbeatTimerRef.current) {
+        clearInterval(heartbeatTimerRef.current as number);
+        heartbeatTimerRef.current = null;
+      }
+    };
   }, [isActive]);
 
-  return (
-    <div className="space-y-4">
-      <h1 className="text-xl font-bold text-blue-700">AI 秘书语音对话测试</h1>
+  // 开/停
+  useEffect(() => {
+    if (isActive) {
+      correctedOnceRef.current = false;
+      recentAIRef.current = [];
+      lastFinalTextRef.current = "";
+      const recog = ensureRecognition();
+      if (recog) (recog as any).lang = "en-US"; // 启动固定英文
+      safeStart();
+    } else {
+      safeStop();
+      destroyRecognition();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive]);
 
-      <div className="space-y-2">
-        <label className="block text-sm font-medium">使用模式</label>
-        <select
-          value={mode}
-          onChange={(e) => setMode(e.target.value)}
-          className="border px-3 py-2 rounded w-full"
-        >
-          <option value="face-to-face">面对面沟通</option>
-          <option value="make-call">拨打电话</option>
-          <option value="receive-call">接听电话</option>
-        </select>
+  // 手动输入：不播报手动文本
+  const handleManualSend = async (text: string) => {
+    if (!text?.trim()) return;
+
+    setConversation((prev) => [...prev, `🧑 ${myName || "Me"} (manual): ${text}`]);
+    manualInputsRef.current = [text, ...manualInputsRef.current].slice(0, 5);
+
+    const recent = conversation.slice(-4).join("\n") || "(none)";
+
+    const persona = (myName || "Speaker").trim();
+    const systemMessage = `
+You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
+Your persona name is "${persona}". Never claim to be anyone else.
+Be natural, concise, professional (1–3 sentences). Progress the talk with one crisp point.
+Do not echo my manual note verbatim; paraphrase.
+`.trim();
+
+    const userMessage = `
+Recent lines:
+${recent}
+
+My manual note:
+${text}
+
+Task:
+1) Reply in English only, first-person as ${persona}, 1–3 sentences.
+2) Paraphrase my note; don't mirror wording.
+3) Ask one precise follow-up if helpful.
+`.trim();
+
+    try {
+      const reply = await getAIResponse({ systemMessage, userMessage });
+      recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
+      setConversation((prev) => [...prev, `🤖 AI: ${reply}`]);
+
+      // 播报（锁定窗口；外放多加缓冲）
+      const recog = ensureRecognition();
+      isSpeakingRef.current = true;
+      try { recog?.stop(); } catch {}
+      const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+      const speakMs = estimateTtsMs(safeReply);
+      const extra = speakerMode ? 700 : 300;
+      await speakWithElevenLabs(safeReply);
+      await new Promise((r) => setTimeout(r, speakMs + extra));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      isSpeakingRef.current = false;
+      if (isActive) safeStart();
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-4">
+      <h2 className="text-xl font-semibold">AI Secretary — Live Conversation</h2>
+
+      <div className="grid gap-3 md:grid-cols-4">
+        <div>
+          <label className="block text-sm mb-1">Mode</label>
+          <select
+            className="w-full border rounded px-2 py-1"
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            disabled={isActive}
+          >
+            <option value="face-to-face">Face to Face</option>
+            <option value="call-out">Call Out</option>
+            <option value="call-in">Call In</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-sm mb-1">My Name</label>
+          <input
+            className="w-full border rounded px-2 py-1"
+            placeholder="e.g. Lucy / Andrew"
+            value={myName}
+            onChange={(e) => setMyName(e.target.value)}
+            disabled={isActive || autoNameFromGuide}
+          />
+          <label className="inline-flex items-center gap-2 mt-1 text-xs">
+            <input
+              type="checkbox"
+              checked={autoNameFromGuide}
+              onChange={(e) => setAutoNameFromGuide(e.target.checked)}
+              disabled={isActive}
+            />
+            Auto name from GUIDE
+          </label>
+        </div>
+
+        <div>
+          <label className="block text-sm mb-1">Counterparty</label>
+          <input
+            className="w-full border rounded px-2 py-1"
+            placeholder="e.g. Kevin (my manager)"
+            value={speakerRole}
+            onChange={(e) => setSpeakerRole(e.target.value)}
+            disabled={isActive}
+          />
+        </div>
+
+        <div className="flex items-end justify-between">
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={speakerMode}
+              onChange={(e) => setSpeakerMode(e.target.checked)}
+              disabled={isActive}
+            />
+            Speakerphone Mode (Echo Shield)
+          </label>
+          <button
+            className={`px-3 py-2 rounded text-white ${isActive ? "bg-red-500" : "bg-green-600"}`}
+            onClick={() => setIsActive((v) => !v)}
+          >
+            {isActive ? "Stop" : "Start"}
+          </button>
+        </div>
       </div>
 
       <div>
-        <label className="block text-sm font-medium">背景信息</label>
+        <label className="block text-sm mb-1">GUIDE / Background</label>
         <textarea
+          className="w-full border rounded px-2 py-2 h-32"
+          placeholder={`Paste your secretary template here.（可留空；也可写 "My name is xxx" 来自动取名）`}
           value={background}
           onChange={(e) => setBackground(e.target.value)}
-          placeholder="请输入背景信息，例如你当前的位置、身份、目的等"
-          className="border px-3 py-2 rounded w-full"
+          disabled={isActive}
         />
       </div>
 
-      <div>
-        <label className="block text-sm font-medium">对方是谁（医生/老师/银行…）</label>
-        <input
-          value={speakerRole}
-          onChange={(e) => setSpeakerRole(e.target.value)}
-          placeholder="如 医生"
-          className="border px-3 py-2 rounded w-full"
-        />
-      </div>
-
-      <button
-        onClick={() => setIsActive((v) => !v)}
-        className={`px-4 py-2 rounded text-white ${isActive ? 'bg-red-500' : 'bg-green-600'}`}
-      >
-        {isActive ? '🛑 停止对话' : '🎤 启动对话'}
-      </button>
-
-      <div className="bg-gray-100 p-4 rounded space-y-2 h-64 overflow-y-auto">
+      <div className="border rounded p-3 bg-white">
         {conversation.map((line, idx) => (
-          <div key={idx}>{line}</div>
+          <div key={idx} className="whitespace-pre-wrap leading-7">
+            {line}
+          </div>
         ))}
       </div>
+
+      <ManualInputBox onSend={handleManualSend} setConversation={setConversation} />
     </div>
   );
 }
