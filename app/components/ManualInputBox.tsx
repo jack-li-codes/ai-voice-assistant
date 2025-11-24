@@ -1,25 +1,17 @@
 import { useState } from 'react';
-import { speakWithElevenLabs } from '@/lib/voice/speakWithElevenLabs';
 
 type Props = {
   onSend?: (text: string) => void;
-  setConversation?: React.Dispatch<React.SetStateAction<string[]>>;
 };
 
-function ManualInputBox({ onSend, setConversation }: Props) {
+function ManualInputBox({ onSend }: Props) {
   const [manualInput, setManualInput] = useState('');
 
-  const handleSend = async () => {
+  const handleSend = () => {
     if (!manualInput.trim()) return;
 
-    // 语音播报
-    await speakWithElevenLabs(manualInput);
-
-    // 通知上层组件（可选）
+    // 通知上层组件处理（生成英文 + 播报）
     onSend?.(manualInput);
-
-    // 更新对话记录
-    setConversation?.((prev) => [...prev, manualInput]);
 
     // 清空输入框
     setManualInput('');
@@ -28,11 +20,14 @@ function ManualInputBox({ onSend, setConversation }: Props) {
   return (
     <div className="mt-4 border-t pt-4">
       <label className="block font-medium mb-1">人工输入（可覆盖 AI 回答）</label>
+      <p className="text-xs text-gray-500 mb-2">
+        EN: Manual input to override or supplement the AI's reply.
+      </p>
       <div className="flex gap-2">
         <input
           type="text"
           className="border rounded p-2 flex-1"
-          placeholder="你想让助手说什么？"
+          placeholder="你想让助手说什么？ / What do you want the assistant to say?"
           value={manualInput}
           onChange={(e) => setManualInput(e.target.value)}
         />

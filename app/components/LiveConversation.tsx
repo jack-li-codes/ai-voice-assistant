@@ -372,6 +372,33 @@ Task:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive]);
 
+  // 导出对话记录为 .txt 文件
+  const exportConversation = () => {
+    if (conversation.length === 0) return;
+
+    const content = conversation.join("\n");
+
+    // 生成时间戳：2025-11-24-16-30-05 格式
+    const now = new Date();
+    const timestamp = now
+      .toISOString()
+      .replace(/T/, "-")
+      .replace(/:/g, "-")
+      .split(".")[0];
+
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ai-secretary-conversation-${timestamp}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    URL.revokeObjectURL(url);
+  };
+
   // 手动输入：不播报手动文本
   const handleManualSend = async (text: string) => {
     if (!text?.trim()) return;
@@ -430,24 +457,24 @@ Task:
 
       <div className="grid gap-3 md:grid-cols-4">
         <div>
-          <label className="block text-sm mb-1">Mode</label>
+          <label className="block text-sm mb-1">Mode 模式</label>
           <select
             className="w-full border rounded px-2 py-1"
             value={mode}
             onChange={(e) => setMode(e.target.value)}
             disabled={isActive}
           >
-            <option value="face-to-face">Face to Face</option>
-            <option value="call-out">Call Out</option>
-            <option value="call-in">Call In</option>
+            <option value="face-to-face">Face to Face 当面沟通</option>
+            <option value="call-out">Call Out 主动打电话</option>
+            <option value="call-in">Call In 接听来电</option>
           </select>
         </div>
 
         <div>
-          <label className="block text-sm mb-1">My Name</label>
+          <label className="block text-sm mb-1">My Name 我的身份</label>
           <input
             className="w-full border rounded px-2 py-1"
-            placeholder="e.g. Lucy / Andrew"
+            placeholder="例如：James的爸爸 / e.g. James' father"
             value={myName}
             onChange={(e) => setMyName(e.target.value)}
             disabled={isActive || autoNameFromGuide}
@@ -459,15 +486,15 @@ Task:
               onChange={(e) => setAutoNameFromGuide(e.target.checked)}
               disabled={isActive}
             />
-            Auto name from GUIDE
+            自动从 GUIDE 提取 / Auto from GUIDE
           </label>
         </div>
 
         <div>
-          <label className="block text-sm mb-1">Counterparty</label>
+          <label className="block text-sm mb-1">Counterparty 对方身份</label>
           <input
             className="w-full border rounded px-2 py-1"
-            placeholder="e.g. Kevin (my manager)"
+            placeholder="例如：急诊科医生 / e.g. ER doctor"
             value={speakerRole}
             onChange={(e) => setSpeakerRole(e.target.value)}
             disabled={isActive}
@@ -482,26 +509,85 @@ Task:
               onChange={(e) => setSpeakerMode(e.target.checked)}
               disabled={isActive}
             />
-            Speakerphone Mode (Echo Shield)
+            扬声器模式（防回声） / Speakerphone Mode (Echo Shield)
           </label>
           <button
             className={`px-3 py-2 rounded text-white ${isActive ? "bg-red-500" : "bg-green-600"}`}
             onClick={() => setIsActive((v) => !v)}
           >
-            {isActive ? "Stop" : "Start"}
+            {isActive ? "停止 Stop" : "开始 Start"}
           </button>
         </div>
       </div>
 
       <div>
-        <label className="block text-sm mb-1">GUIDE / Background</label>
+        <label className="block text-sm mb-1 font-medium">GUIDE / Background 背景说明</label>
+
+        {/* 文件上传控件 */}
+        <div className="mb-2">
+          <input
+            type="file"
+            accept=".txt,.md,.rtf,.text"
+            className="text-sm"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+
+              const reader = new FileReader();
+              reader.onload = (event) => {
+                let raw = String(event.target?.result || "");
+
+                // 统一换行符
+                raw = raw.replace(/\r\n/g, "\n");
+                // 去掉 BOM
+                raw = raw.replace(/^\uFEFF/, "");
+
+                // 按空行分段
+                const parts = raw.split(/\n\s*\n/);
+                let cleaned: string;
+                if (parts.length > 1) {
+                  // 跳过第一段（标题），使用后面的正文
+                  cleaned = parts.slice(1).join("\n\n").trimStart();
+                } else {
+                  // 没有空行，退化为原来的行为
+                  cleaned = raw.trimStart();
+                }
+
+                setBackground(cleaned);
+              };
+              reader.onerror = () => {
+                alert("文件读取失败，请重试。");
+              };
+              reader.readAsText(file, "utf-8");
+
+              // 清空 input，允许重复上传同一文件
+              e.target.value = "";
+            }}
+            disabled={isActive}
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            可选择本地 .txt/.md/.rtf 文件导入病情/背景说明
+          </p>
+        </div>
+
         <textarea
           className="w-full border rounded px-2 py-2 h-32"
-          placeholder={`Paste your secretary template here.（可留空；也可写 "My name is xxx" 来自动取名）`}
+          placeholder="在这里简要写明病情或背景，AI 会按照这里的内容来回答。也可以上方导入 .txt 文件。 / Briefly describe the situation here, or import a .txt file above."
           value={background}
           onChange={(e) => setBackground(e.target.value)}
           disabled={isActive}
         />
+      </div>
+
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-medium">对话记录 Conversation</h3>
+        <button
+          className="px-3 py-1 rounded text-sm bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+          onClick={exportConversation}
+          disabled={conversation.length === 0}
+        >
+          导出为文本 Export .txt
+        </button>
       </div>
 
       <div className="border rounded p-3 bg-white">
@@ -512,7 +598,7 @@ Task:
         ))}
       </div>
 
-      <ManualInputBox onSend={handleManualSend} setConversation={setConversation} />
+      <ManualInputBox onSend={handleManualSend} />
     </div>
   );
 }
