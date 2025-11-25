@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { getAIResponse } from "@/lib/gpt/getAIResponse";
 import { speakWithElevenLabs } from "@/lib/voice/speakWithElevenLabs";
+import { toBilingual, hasChinese } from "@/lib/translate";
+import { ChatMessage } from "@/lib/types/message";
 import ManualInputBox from "./ManualInputBox";
 
 declare global {
@@ -135,7 +137,7 @@ export default function LiveConversation() {
   const [speakerMode, setSpeakerMode] = useState(true);
 
   // —— 对话与控制 —— //
-  const [conversation, setConversation] = useState<string[]>([]);
+  const [conversation, setConversation] = useState<ChatMessage[]>([]);
   const [isActive, setIsActive] = useState(false);
 
   // 识别/播报控制
@@ -224,13 +226,24 @@ export default function LiveConversation() {
         return;
       }
 
-      setConversation((prev) => [...prev, `🧑 Partner: ${finalText}`]);
+      // Create bilingual message for partner's speech
+      const partnerBilingual = await toBilingual(finalText);
+      const partnerMsg: ChatMessage = {
+        id: `partner-${Date.now()}`,
+        role: "user",
+        contentEN: partnerBilingual.en,
+        contentZH: partnerBilingual.zh,
+        timestamp: Date.now(),
+      };
+      setConversation((prev) => [...prev, partnerMsg]);
 
       // —— 名字误叫，仅纠一次 —— //
       const mustCorrectOnce = detectMisname(finalText, myName) && !correctedOnceRef.current;
 
       // —— 轻量上下文 —— //
-      const recent = conversation.slice(-4).join("\n") || "(none)";
+      const recent = conversation.slice(-4).map(msg =>
+        `${msg.role === 'user' ? '🧑 Partner' : '🤖 AI'}: ${msg.contentEN}`
+      ).join("\n") || "(none)";
 
       // —— 系统提示（动态身份 + 英文） —— //
       const persona = (myName || "Speaker").trim();
@@ -274,7 +287,16 @@ Task:
         // 记录最近 3 条 AI 回复，供回声过滤
         recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
 
-        setConversation((prev) => [...prev, `🤖 AI: ${reply}`]);
+        // Translate AI's English reply to Chinese
+        const aiZH = await toBilingual(reply).then(b => b.zh);
+        const aiMsg: ChatMessage = {
+          id: `ai-${Date.now()}`,
+          role: "assistant",
+          contentEN: reply,
+          contentZH: aiZH,
+          timestamp: Date.now(),
+        };
+        setConversation((prev) => [...prev, aiMsg]);
 
         // —— 播报窗口锁定（外放多加缓冲） —— //
         const recog2 = recognitionRef.current;
@@ -376,7 +398,17 @@ Task:
   const exportConversation = () => {
     if (conversation.length === 0) return;
 
-    const content = conversation.join("\n");
+    // Format bilingual messages for export
+    const content = conversation.map(msg => {
+      const role = msg.role === "user" ? "🧑 You" : "🤖 AI";
+      const isChinese = hasChinese(msg.contentZH);
+      // Show original language first, then translation
+      if (isChinese) {
+        return `${role} (ZH): ${msg.contentZH}\n${role} (EN): ${msg.contentEN}`;
+      } else {
+        return `${role} (EN): ${msg.contentEN}\n${role} (ZH): ${msg.contentZH}`;
+      }
+    }).join("\n\n");
 
     // 生成时间戳：2025-11-24-16-30-05 格式
     const now = new Date();
@@ -403,10 +435,22 @@ Task:
   const handleManualSend = async (text: string) => {
     if (!text?.trim()) return;
 
-    setConversation((prev) => [...prev, `🧑 ${myName || "Me"} (manual): ${text}`]);
+    // Create bilingual message for manual input
+    const manualBilingual = await toBilingual(text);
+    const manualMsg: ChatMessage = {
+      id: `manual-${Date.now()}`,
+      role: "user",
+      contentEN: manualBilingual.en,
+      contentZH: manualBilingual.zh,
+      timestamp: Date.now(),
+      isManual: true,
+    };
+    setConversation((prev) => [...prev, manualMsg]);
     manualInputsRef.current = [text, ...manualInputsRef.current].slice(0, 5);
 
-    const recent = conversation.slice(-4).join("\n") || "(none)";
+    const recent = conversation.slice(-4).map(msg =>
+      `${msg.role === 'user' ? `🧑 ${myName || "Me"}` : '🤖 AI'}: ${msg.contentEN}`
+    ).join("\n") || "(none)";
 
     const persona = (myName || "Speaker").trim();
     const systemMessage = `
@@ -432,7 +476,17 @@ Task:
     try {
       const reply = await getAIResponse({ systemMessage, userMessage });
       recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
-      setConversation((prev) => [...prev, `🤖 AI: ${reply}`]);
+
+      // Translate AI's English reply to Chinese
+      const aiZH = await toBilingual(reply).then(b => b.zh);
+      const aiMsg: ChatMessage = {
+        id: `ai-manual-${Date.now()}`,
+        role: "assistant",
+        contentEN: reply,
+        contentZH: aiZH,
+        timestamp: Date.now(),
+      };
+      setConversation((prev) => [...prev, aiMsg]);
 
       // 播报（锁定窗口；外放多加缓冲）
       const recog = ensureRecognition();
@@ -591,11 +645,51 @@ Task:
       </div>
 
       <div className="border rounded p-3 bg-white">
-        {conversation.map((line, idx) => (
-          <div key={idx} className="whitespace-pre-wrap leading-7">
-            {line}
-          </div>
-        ))}
+        {conversation.map((msg, idx) => {
+          const isUser = msg.role === "user";
+          const isAI = msg.role === "assistant";
+          const isChinese = hasChinese(msg.contentZH);
+
+          // Determine display order: original first, then translation
+          let firstLang: string, firstContent: string;
+          let secondLang: string, secondContent: string;
+
+          if (isAI) {
+            // AI messages: always EN first, then ZH
+            firstLang = "EN";
+            firstContent = msg.contentEN;
+            secondLang = "ZH";
+            secondContent = msg.contentZH;
+          } else {
+            // User messages: original language first
+            if (isChinese) {
+              firstLang = "ZH";
+              firstContent = msg.contentZH;
+              secondLang = "EN";
+              secondContent = msg.contentEN;
+            } else {
+              firstLang = "EN";
+              firstContent = msg.contentEN;
+              secondLang = "ZH";
+              secondContent = msg.contentZH;
+            }
+          }
+
+          const roleLabel = isUser
+            ? (msg.isManual ? `🧑 ${myName || "You"} (manual)` : "🧑 Partner")
+            : "🤖 AI";
+
+          return (
+            <div key={msg.id || idx} className="mb-3 leading-7">
+              <div className="whitespace-pre-wrap">
+                {roleLabel} ({firstLang}): {firstContent}
+              </div>
+              <div className="whitespace-pre-wrap text-gray-600">
+                {roleLabel} ({secondLang}): {secondContent}
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <ManualInputBox onSend={handleManualSend} />
