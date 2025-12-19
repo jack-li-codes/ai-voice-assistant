@@ -197,7 +197,15 @@ export default function LiveConversation() {
 
   // —— 对话与控制 —— //
   const [conversation, setConversation] = useState<ChatMessage[]>([]);
+  const conversationRef = useRef<ChatMessage[]>([]);
   const [isActive, setIsActive] = useState(false);
+
+  // —— 🪄 Suggested Line —— //
+  const [pendingLines, setPendingLines] = useState<string[]>([]);
+  const [isGeneratingLine, setIsGeneratingLine] = useState(false);
+
+  // Auto suggestions control (LIVE mode only)
+  const [autoSuggestEnabled, setAutoSuggestEnabled] = useState(false);
 
   // Notes 模式：自动时间戳
   const lastTimestampRef = useRef<number>(0);
@@ -235,6 +243,11 @@ export default function LiveConversation() {
     if (n && n !== myName) setMyName(n);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [background, autoNameFromGuide]);
+
+  // Sync conversationRef with conversation state (for suggested lines)
+  useEffect(() => {
+    conversationRef.current = conversation;
+  }, [conversation]);
 
   /* 检查并插入时间戳（仅 Notes 模式） */
   const maybeInsertTimestamp = (forceIfAfter30s = false) => {
@@ -336,6 +349,13 @@ export default function LiveConversation() {
     };
     setConversation((prev) => [...prev, partnerMsg]);
 
+    // —— LIVE 模式下，如果 Auto suggestions 关闭，则只保存转写，不生成 AI 回复 —— //
+    const isLiveMode = voiceOutputMode === "LIVE";
+    if (isLiveMode && !autoSuggestEnabled) {
+      console.log("[LIVE] auto-suggest disabled, skip AI response");
+      return;
+    }
+
     // —— 名字误叫，仅纠一次 —— //
     const mustCorrectOnce = detectMisname(text, myName) && !correctedOnceRef.current;
 
@@ -346,7 +366,6 @@ export default function LiveConversation() {
 
     // —— 系统提示（动态身份 + 英文 + 模式区分） —— //
     const persona = (myName || "Speaker").trim();
-    const isLiveMode = voiceOutputMode === "LIVE";
 
     const systemMessage = isLiveMode
       ? `
@@ -888,6 +907,102 @@ Task:
     }
   };
 
+  // 🪄 Generate Suggested Lines (multiple options)
+  const generateSuggestedLine = async () => {
+    if (isGeneratingLine) return;
+
+    setIsGeneratingLine(true);
+    try {
+      // Build recent context from conversationRef (always uses latest state)
+      const recent = conversationRef.current.slice(-6).map(msg =>
+        `${msg.role === 'user' ? '🧑 Partner' : '🤖 AI'}: ${msg.contentEN}`
+      ).join("\n") || "(no conversation yet)";
+
+      const persona = (myName || "Speaker").trim();
+
+      // System message for 2-4 short professional options
+      const systemMessage = `
+You are a silent meeting assistant helping ${persona} with professional conversation.
+Output exactly 2 to 4 options for what ${persona} can say next.
+Each option must be:
+- Short and speakable (6-18 words)
+- Professional English
+- Consistent with recent conversation and GUIDE
+- Prefixed with "- " (dash + space)
+- Avoid questions unless context strongly requires them
+- Do NOT introduce new topics
+- Do NOT add explanations or commentary
+
+Format:
+- [First option]
+- [Second option]
+- [Third option]
+- [Fourth option (optional)]
+`.trim();
+
+      const userMessage = `
+Background context (GUIDE):
+${background ? `"""\n${background}\n"""` : "(none)"}
+
+Recent conversation:
+${recent}
+
+Task:
+Generate 2 to 4 short professional English response options (6-18 words each) that ${persona} can say next.
+Each option on its own line with "- " prefix.
+Avoid questions. Stay consistent with the conversation. No new topics.
+`.trim();
+
+      const reply = await getAIResponse({ systemMessage, userMessage });
+
+      // Parse bullet lines
+      const lines = reply
+        .trim()
+        .split("\n")
+        .map(line => line.trim())
+        .filter(line => line.startsWith("- "))
+        .map(line => line.slice(2).trim())
+        .filter(Boolean);
+
+      if (lines.length > 0) {
+        setPendingLines(lines);
+      } else {
+        // Fallback if parsing fails
+        setPendingLines(["I understand. Let me think about that for a moment."]);
+      }
+    } catch (error) {
+      console.error("Error generating suggested lines:", error);
+      setPendingLines(["I understand. Let me think about that for a moment."]);
+    } finally {
+      setIsGeneratingLine(false);
+    }
+  };
+
+  // Copy a single line to clipboard
+  const copySingleLine = async (line: string) => {
+    if (!line) return;
+    try {
+      await navigator.clipboard.writeText(line);
+    } catch (error) {
+      console.error("Failed to copy:", error);
+    }
+  };
+
+  // Copy all pending lines to clipboard (joined by newline)
+  const copyAllLines = async () => {
+    if (pendingLines.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(pendingLines.join("\n"));
+    } catch (error) {
+      console.error("Failed to copy:", error);
+    }
+  };
+
+  // Clear pendingLines
+  const clearPendingLines = () => {
+    setPendingLines([]);
+  };
+
   return (
     <div className="p-4 space-y-4">
       <h2 className="text-xl font-semibold">AI Secretary — Live Conversation</h2>
@@ -950,6 +1065,27 @@ Task:
             </button>
           </div>
         </div>
+
+        {/* Auto suggestions 开关 - 仅在 LIVE 模式且非 Notes 模式时显示 */}
+        {mode !== "notes" && voiceOutputMode === "LIVE" && (
+          <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoSuggestEnabled}
+                onChange={(e) => setAutoSuggestEnabled(e.target.checked)}
+                disabled={isActive}
+                className="w-4 h-4"
+              />
+              <span className="text-sm font-medium">
+                Auto suggestions (hands-free)
+              </span>
+            </label>
+            <p className="text-xs text-gray-500 mt-1 ml-6">
+              When off, suggestions are generated only by the purple button.
+            </p>
+          </div>
+        )}
 
         {/* Advanced 折叠区 */}
         <details className="mt-2">
@@ -1060,6 +1196,65 @@ Task:
           onChange={(e) => setBackground(e.target.value)}
           disabled={isActive}
         />
+      </div>
+
+      {/* 🪄 Suggested Line Section */}
+      <div className="border rounded p-3 bg-gradient-to-r from-purple-50 to-blue-50">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-medium text-purple-800">🪄 Quick Response Assistant</h3>
+          <button
+            className="px-4 py-2 rounded text-sm bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+            onClick={generateSuggestedLine}
+            disabled={isGeneratingLine}
+          >
+            {isGeneratingLine ? "⏳ Generating..." : "🪄 Suggested line"}
+          </button>
+        </div>
+
+        {/* Draft Box - Multiple suggestions */}
+        {pendingLines.length > 0 && (
+          <div className="mt-3 p-3 bg-white border-2 border-purple-300 rounded-lg">
+            <div className="flex items-start justify-between mb-2">
+              <span className="text-xs font-semibold text-purple-700 uppercase">
+                Draft Options ({pendingLines.length})
+              </span>
+              <div className="flex gap-2">
+                <button
+                  className="px-2 py-1 rounded text-xs bg-green-500 text-white hover:bg-green-600 font-medium"
+                  onClick={copyAllLines}
+                  title="Copy all options"
+                >
+                  📋 Copy all
+                </button>
+                <button
+                  className="px-2 py-1 rounded text-xs bg-gray-500 text-white hover:bg-gray-600 font-medium"
+                  onClick={clearPendingLines}
+                  title="Clear all drafts"
+                >
+                  ✕ Clear
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {pendingLines.map((line, idx) => (
+                <div
+                  key={idx}
+                  className="p-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded cursor-pointer transition-colors"
+                  onClick={() => copySingleLine(line)}
+                  title="Click to copy this line"
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="text-purple-600 font-semibold flex-shrink-0">•</span>
+                    <span className="text-gray-800 leading-relaxed flex-1">{line}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-xs text-gray-500 italic">
+              💡 Click any line to copy it to clipboard
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between mb-2">
