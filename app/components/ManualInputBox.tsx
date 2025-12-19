@@ -17,6 +17,14 @@ function ManualInputBox({ onSend }: Props) {
     setManualInput('');
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+    // Shift + Enter allows default behavior (newline)
+  };
+
   return (
     <div className="mt-4 border-t pt-4">
       <label className="block font-medium mb-1">人工输入（可覆盖 AI 回答）</label>
@@ -24,12 +32,13 @@ function ManualInputBox({ onSend }: Props) {
         EN: Manual input to override or supplement the AI's reply.
       </p>
       <div className="flex gap-2">
-        <input
-          type="text"
-          className="border rounded p-2 flex-1"
+        <textarea
+          className="border rounded p-2 flex-1 resize-y min-h-[2.5rem]"
           placeholder="你想让助手说什么？ / What do you want the assistant to say?"
           value={manualInput}
           onChange={(e) => setManualInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          rows={1}
         />
         <button
           onClick={handleSend}
