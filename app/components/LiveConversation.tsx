@@ -34,6 +34,15 @@ const pickASRLang = (hint: string) => (hasCJK(hint) ? "zh-CN" : "en-US");
 const isGreeting = (t: string) =>
   /^(hi|hello|hey|how are you|哈(啰|罗)|你好)\b/i.test(t);
 
+/** 判断文本是否有效（不是空文本或只有标点） */
+const isMeaningfulText = (t: string) => {
+  const s = (t || "").trim();
+  if (s.length < 2) return false; // 阈值可调 2~5
+  // 只有标点/空白也算无效
+  if (/^[\s\W_]+$/.test(s)) return false;
+  return true;
+};
+
 /** 从 GUIDE 中提取“我的名字”（可英文/中文），找不到就 null */
 function extractNameFromGuide(guide: string): string | null {
   if (!guide) return null;
@@ -149,6 +158,10 @@ export default function LiveConversation() {
   const lastResultAtRef = useRef<number>(0);
   const heartbeatTimerRef = useRef<number | null>(null);
 
+  // 启动抖动保护
+  const startAtRef = useRef<number>(0);
+  const silenceTimerRef = useRef<number | null>(null);
+
   // 回声过滤：记录最近 3 条 AI 回复
   const recentAIRef = useRef<string[]>([]);
 
@@ -166,6 +179,118 @@ export default function LiveConversation() {
     if (n && n !== myName) setMyName(n);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [background, autoNameFromGuide]);
+
+  /* 统一提交入口：防止空提交产生 "noted" */
+  const finalizeAndSubmit = async (text: string, reason: string) => {
+    if (!isMeaningfulText(text)) {
+      // 无效文本：不要发 GPT，不要生成 "noted"
+      console.log("[ASR] skip submit (empty/short)", { reason, text });
+      return;
+    }
+
+    // 清理静音计时器
+    if (silenceTimerRef.current) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    // 回声过滤：与最近 AI 回复高度相似 -> 丢弃
+    const echoThreshold = speakerMode ? 0.50 : 0.55;
+    if (isEchoOfAI(text, recentAIRef.current, echoThreshold)) {
+      console.log("[ASR] skip submit (echo detected)", { reason, text });
+      return;
+    }
+
+    // Create bilingual message for partner's speech
+    const partnerBilingual = await toBilingual(text);
+    const partnerMsg: ChatMessage = {
+      id: `partner-${Date.now()}`,
+      role: "user",
+      contentEN: partnerBilingual.en,
+      contentZH: partnerBilingual.zh,
+      timestamp: Date.now(),
+    };
+    setConversation((prev) => [...prev, partnerMsg]);
+
+    // —— 名字误叫，仅纠一次 —— //
+    const mustCorrectOnce = detectMisname(text, myName) && !correctedOnceRef.current;
+
+    // —— 轻量上下文 —— //
+    const recent = conversation.slice(-4).map(msg =>
+      `${msg.role === 'user' ? '🧑 Partner' : '🤖 AI'}: ${msg.contentEN}`
+    ).join("\n") || "(none)";
+
+    // —— 系统提示（动态身份 + 英文） —— //
+    const persona = (myName || "Speaker").trim();
+    const systemMessage = `
+You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
+Your persona name is "${persona}". NEVER claim to be anyone else.
+If the partner misnames you, correct ONCE with: "Hi — this is ${persona}." then continue.
+Do NOT reveal you are an assistant. Be natural, concise, professional (1–3 sentences).
+Avoid repeating the same point; move the conversation forward with one crisp question or update.
+Never echo my manual notes verbatim; paraphrase naturally.
+
+GUIDE (verbatim if present):
+${background ? `"""\n${background}\n"""` : "(empty)"}
+
+Context:
+- Mode: ${mode || "N/A"}
+- Counterparty: ${speakerRole || "N/A"}
+`.trim();
+
+    const userMessage = `
+Recent lines:
+${recent}
+
+New partner line:
+${text}
+
+Task:
+1) Reply in ENGLISH only, first-person as ${persona}, 1–3 sentences.
+2) If this line is another greeting, transition to ONE concrete topic rather than repeating greetings.
+3) Paraphrase; do not mirror the user's words.
+`.trim();
+
+    let finalUserMessage = userMessage;
+    if (mustCorrectOnce) {
+      finalUserMessage += `\nAlso: Begin with exactly: "Hi — this is ${persona}." once, then continue.`;
+    }
+
+    try {
+      const reply = await getAIResponse({ systemMessage, userMessage: finalUserMessage });
+
+      // 记录最近 3 条 AI 回复，供回声过滤
+      recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
+
+      // Translate AI's English reply to Chinese
+      const aiZH = await toBilingual(reply).then(b => b.zh);
+      const aiMsg: ChatMessage = {
+        id: `ai-${Date.now()}`,
+        role: "assistant",
+        contentEN: reply,
+        contentZH: aiZH,
+        timestamp: Date.now(),
+      };
+      setConversation((prev) => [...prev, aiMsg]);
+
+      // —— 播报窗口锁定（外放多加缓冲） —— //
+      const recog2 = recognitionRef.current;
+      const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+      const speakMs = estimateTtsMs(safeReply);
+      const extra = speakerMode ? 700 : 300;
+      isSpeakingRef.current = true;
+      try { recog2?.stop(); } catch {}
+      await speakWithElevenLabs(safeReply);
+      await new Promise((r) => setTimeout(r, speakMs + extra));
+    } catch (e) {
+      console.error("❌ generate/speak error:", e);
+    } finally {
+      isSpeakingRef.current = false;
+      try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
+    }
+
+    if (mustCorrectOnce) correctedOnceRef.current = true;
+  };
 
   /* 识别器 */
   const ensureRecognition = () => {
@@ -190,7 +315,13 @@ export default function LiveConversation() {
       const IGNORE_WINDOW_MS = speakerMode ? 1800 : 1200;
       if (Date.now() - listeningResumedAtRef.current < IGNORE_WINDOW_MS) return;
 
+      // 更新时间戳并重置静音计时器
       lastResultAtRef.current = Date.now();
+
+      // 清理并重新设置静音计时器（1s 无新结果，强制提交）
+      if (silenceTimerRef.current) {
+        window.clearTimeout(silenceTimerRef.current);
+      }
 
       // 取最后一个 isFinal=true 的结果
       let finalText = "";
@@ -201,7 +332,30 @@ export default function LiveConversation() {
           break;
         }
       }
-      if (!finalText) return;
+
+      if (!finalText) {
+        // 即使没有 final text，也要设置静音计时器
+        silenceTimerRef.current = window.setTimeout(() => {
+          // 1s 无新结果，尝试提交（如果有积累的 text）
+          // 这里我们没有积累机制，所以只是清理
+          silenceTimerRef.current = null;
+        }, 1000);
+        return;
+      }
+
+      // 启动抖动保护：启动后 800ms 内的短文本直接忽略
+      const now = Date.now();
+      const warmup = now - startAtRef.current < 800;
+      if (warmup && !isMeaningfulText(finalText)) {
+        console.log("[ASR] warmup ignore:", finalText);
+        return;
+      }
+
+      // 设置静音计时器
+      silenceTimerRef.current = window.setTimeout(() => {
+        // 这里不需要再次提交，因为 finalText 已经在下面处理了
+        silenceTimerRef.current = null;
+      }, 1000);
 
       // 只基于当前文本切语言（含中文才切中文）
       const want = pickASRLang(finalText);
@@ -211,7 +365,7 @@ export default function LiveConversation() {
         try { recog.start(); markListeningResumed(); } catch {}
       }
 
-      // 去重：和上次“最终文本”几乎一致就丢弃
+      // 去重：和上次"最终文本"几乎一致就丢弃
       const lastFinal = lastFinalTextRef.current;
       const almostSame =
         finalText === lastFinal ||
@@ -221,101 +375,8 @@ export default function LiveConversation() {
       if (almostSame) return;
       lastFinalTextRef.current = finalText;
 
-      // 回声过滤：与最近 AI 回复高度相似 -> 丢弃
-      const echoThreshold = speakerMode ? 0.50 : 0.55;
-      if (isEchoOfAI(finalText, recentAIRef.current, echoThreshold)) {
-        return;
-      }
-
-      // Create bilingual message for partner's speech
-      const partnerBilingual = await toBilingual(finalText);
-      const partnerMsg: ChatMessage = {
-        id: `partner-${Date.now()}`,
-        role: "user",
-        contentEN: partnerBilingual.en,
-        contentZH: partnerBilingual.zh,
-        timestamp: Date.now(),
-      };
-      setConversation((prev) => [...prev, partnerMsg]);
-
-      // —— 名字误叫，仅纠一次 —— //
-      const mustCorrectOnce = detectMisname(finalText, myName) && !correctedOnceRef.current;
-
-      // —— 轻量上下文 —— //
-      const recent = conversation.slice(-4).map(msg =>
-        `${msg.role === 'user' ? '🧑 Partner' : '🤖 AI'}: ${msg.contentEN}`
-      ).join("\n") || "(none)";
-
-      // —— 系统提示（动态身份 + 英文） —— //
-      const persona = (myName || "Speaker").trim();
-      const systemMessage = `
-You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
-Your persona name is "${persona}". NEVER claim to be anyone else.
-If the partner misnames you, correct ONCE with: "Hi — this is ${persona}." then continue.
-Do NOT reveal you are an assistant. Be natural, concise, professional (1–3 sentences).
-Avoid repeating the same point; move the conversation forward with one crisp question or update.
-Never echo my manual notes verbatim; paraphrase naturally.
-
-GUIDE (verbatim if present):
-${background ? `"""\n${background}\n"""` : "(empty)"}
-
-Context:
-- Mode: ${mode || "N/A"}
-- Counterparty: ${speakerRole || "N/A"}
-`.trim();
-
-      const userMessage = `
-Recent lines:
-${recent}
-
-New partner line:
-${finalText}
-
-Task:
-1) Reply in ENGLISH only, first-person as ${persona}, 1–3 sentences.
-2) If this line is another greeting, transition to ONE concrete topic rather than repeating greetings.
-3) Paraphrase; do not mirror the user's words.
-`.trim();
-
-      let finalUserMessage = userMessage;
-      if (mustCorrectOnce) {
-        finalUserMessage += `\nAlso: Begin with exactly: "Hi — this is ${persona}." once, then continue.`;
-      }
-
-      try {
-        const reply = await getAIResponse({ systemMessage, userMessage: finalUserMessage });
-
-        // 记录最近 3 条 AI 回复，供回声过滤
-        recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
-
-        // Translate AI's English reply to Chinese
-        const aiZH = await toBilingual(reply).then(b => b.zh);
-        const aiMsg: ChatMessage = {
-          id: `ai-${Date.now()}`,
-          role: "assistant",
-          contentEN: reply,
-          contentZH: aiZH,
-          timestamp: Date.now(),
-        };
-        setConversation((prev) => [...prev, aiMsg]);
-
-        // —— 播报窗口锁定（外放多加缓冲） —— //
-        const recog2 = recognitionRef.current;
-        const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
-        const speakMs = estimateTtsMs(safeReply);
-        const extra = speakerMode ? 700 : 300;
-        isSpeakingRef.current = true;
-        try { recog2?.stop(); } catch {}
-        await speakWithElevenLabs(safeReply);
-        await new Promise((r) => setTimeout(r, speakMs + extra));
-      } catch (e) {
-        console.error("❌ generate/speak error:", e);
-      } finally {
-        isSpeakingRef.current = false;
-        try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
-      }
-
-      if (mustCorrectOnce) correctedOnceRef.current = true;
+      // 调用统一提交入口
+      await finalizeAndSubmit(finalText, "onresult-final");
     };
 
     recog.onerror = (e: any) => {
@@ -323,6 +384,12 @@ Task:
     };
 
     recog.onend = () => {
+      // 清理静音计时器
+      if (silenceTimerRef.current) {
+        window.clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+      // 重启识别（如果还在活跃状态）
       if (isActive && !isSpeakingRef.current) {
         try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
       }
@@ -332,8 +399,21 @@ Task:
     return recog;
   };
 
-  const safeStart = () => { try { ensureRecognition()?.start(); markListeningResumed(); } catch {} };
-  const safeStop = () => { try { recognitionRef.current?.stop(); } catch {} };
+  const safeStart = () => {
+    startAtRef.current = Date.now(); // 记录启动时间
+    if (silenceTimerRef.current) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    try { ensureRecognition()?.start(); markListeningResumed(); } catch {}
+  };
+  const safeStop = () => {
+    if (silenceTimerRef.current) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    try { recognitionRef.current?.stop(); } catch {}
+  };
   const destroyRecognition = () => {
     try {
       if (recognitionRef.current) {
