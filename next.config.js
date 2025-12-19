@@ -7,5 +7,8 @@ const nextConfig = {
   },
 };
 
-module.exports = nextConfig; 
-console.log("✅ Loaded ENV:", process.env.ELEVENLABS_API_KEY, process.env.ELEVENLABS_VOICE_ID);
+module.exports = nextConfig;
+console.log("✅ Loaded ENV:", {
+  ELEVENLABS_API_KEY: !!process.env.ELEVENLABS_API_KEY,
+  ELEVENLABS_VOICE_ID: !!process.env.ELEVENLABS_VOICE_ID
+});
