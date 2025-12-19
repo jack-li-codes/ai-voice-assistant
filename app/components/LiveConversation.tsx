@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { getAIResponse } from "@/lib/gpt/getAIResponse";
-import { speakWithElevenLabs } from "@/lib/voice/speakWithElevenLabs";
+import { speakWithElevenLabs, stopCurrentSpeech } from "@/lib/voice/speakWithElevenLabs";
 import { toBilingual, hasChinese } from "@/lib/translate";
 import { ChatMessage } from "@/lib/types/message";
 import ManualInputBox from "./ManualInputBox";
@@ -123,6 +123,35 @@ function isEchoOfAI(partnerText: string, recentAI: string[], threshold = 0.55) {
   return false;
 }
 
+/** 自我语音过滤：检测用户是否在读 AI 刚才的建议 (Live 模式专用) */
+function isSimilarToLastAISuggestion(
+  input: string,
+  lastSuggested: string,
+  lastSuggestedAt: number
+): boolean {
+  if (!lastSuggested) return false;
+
+  // 时间窗口：10 秒内
+  if (Date.now() - lastSuggestedAt > 10000) return false;
+
+  const t1 = normalize(input);
+  const t2 = normalize(lastSuggested);
+
+  // 太短的输入不判断
+  if (t1.length < 10) return false;
+
+  // 包含关系：检查前 20 个字符是否匹配
+  const prefix = t2.slice(0, 20);
+  if (prefix && t1.includes(prefix)) return true;
+
+  // Jaccard 相似度
+  const set1 = tokenSet(input);
+  const set2 = tokenSet(lastSuggested);
+  const similarity = jaccard(set1, set2);
+
+  return similarity > 0.7;
+}
+
 /** 是否把我叫错（根据动态 myName） */
 function detectMisname(text: string, myName: string) {
   const name = (myName || "").trim();
@@ -138,6 +167,12 @@ export default function LiveConversation() {
   const [mode, setMode] = useState("face-to-face");
   const [background, setBackground] = useState("");
   const [speakerRole, setSpeakerRole] = useState("");
+
+  // Voice Output Mode: "LIVE" = 你说 (TTS OFF), "AGENT" = AI说 (TTS ON)
+  const [voiceOutputMode, setVoiceOutputMode] = useState<"LIVE" | "AGENT">("LIVE");
+
+  // UI 折叠控制
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // 动态身份
   const [myName, setMyName] = useState("Lucy"); // 默认值，随时可改
@@ -171,6 +206,10 @@ export default function LiveConversation() {
   // 播报后忽略窗口：重启识别后的一小段时间内丢弃任何结果
   const listeningResumedAtRef = useRef<number>(0);
   const markListeningResumed = () => { listeningResumedAtRef.current = Date.now(); };
+
+  // 自我语音过滤：记录最近的 AI 建议文本（Live 模式专用）
+  const lastAISuggestedTextRef = useRef<string>("");
+  const lastAISuggestedAtRef = useRef<number>(0);
 
   // 根据 GUIDE 自动更新名字（可关闭）
   useEffect(() => {
@@ -220,9 +259,29 @@ export default function LiveConversation() {
       `${msg.role === 'user' ? '🧑 Partner' : '🤖 AI'}: ${msg.contentEN}`
     ).join("\n") || "(none)";
 
-    // —— 系统提示（动态身份 + 英文） —— //
+    // —— 系统提示（动态身份 + 英文 + 模式区分） —— //
     const persona = (myName || "Speaker").trim();
-    const systemMessage = `
+    const isLiveMode = voiceOutputMode === "LIVE";
+
+    const systemMessage = isLiveMode
+      ? `
+You are my real-time conversation assistant. Provide natural English suggestions that I can say directly.
+My name is "${persona}". Always write suggestions in FIRST PERSON as ${persona} (not as an AI).
+Generate short, natural, spoken phrases (1-3 sentences) that sound like a real person talking.
+If I lack information, suggest safe fallback phrases like:
+- "I don't have the exact number in front of me, but I can follow up right after this."
+- "Let me double-check that and get back to you."
+
+NEVER mention AI, assistant, or reveal automated help. Sound completely natural.
+
+GUIDE (context if present):
+${background ? `"""\n${background}\n"""` : "(empty)"}
+
+Context:
+- Mode: ${mode || "N/A"}
+- Counterparty: ${speakerRole || "N/A"}
+`.trim()
+      : `
 You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
 Your persona name is "${persona}". NEVER claim to be anyone else.
 If the partner misnames you, correct ONCE with: "Hi — this is ${persona}." then continue.
@@ -238,7 +297,19 @@ Context:
 - Counterparty: ${speakerRole || "N/A"}
 `.trim();
 
-    const userMessage = `
+    const userMessage = isLiveMode
+      ? `
+Recent lines:
+${recent}
+
+Partner just said:
+${text}
+
+Task:
+Generate ONLY what I should say next in ENGLISH (1-3 natural sentences, first-person as ${persona}).
+Do not explain or add commentary. Just provide the suggested reply I can read aloud.
+`.trim()
+      : `
 Recent lines:
 ${recent}
 
@@ -262,6 +333,12 @@ Task:
       // 记录最近 3 条 AI 回复，供回声过滤
       recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
 
+      // 自我语音过滤：在 Live 模式下保存标准化的 AI 建议
+      if (isLiveMode) {
+        lastAISuggestedTextRef.current = normalize(reply);
+        lastAISuggestedAtRef.current = Date.now();
+      }
+
       // Translate AI's English reply to Chinese
       const aiZH = await toBilingual(reply).then(b => b.zh);
       const aiMsg: ChatMessage = {
@@ -273,20 +350,25 @@ Task:
       };
       setConversation((prev) => [...prev, aiMsg]);
 
-      // —— 播报窗口锁定（外放多加缓冲） —— //
-      const recog2 = recognitionRef.current;
-      const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
-      const speakMs = estimateTtsMs(safeReply);
-      const extra = speakerMode ? 700 : 300;
-      isSpeakingRef.current = true;
-      try { recog2?.stop(); } catch {}
-      await speakWithElevenLabs(safeReply);
-      await new Promise((r) => setTimeout(r, speakMs + extra));
+      // —— 播报窗口锁定（仅 Agent 模式） —— //
+      if (voiceOutputMode === "AGENT") {
+        const recog2 = recognitionRef.current;
+        const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+        const speakMs = estimateTtsMs(safeReply);
+        const extra = speakerMode ? 700 : 300;
+        isSpeakingRef.current = true;
+        try { recog2?.stop(); } catch {}
+        await speakWithElevenLabs(safeReply);
+        await new Promise((r) => setTimeout(r, speakMs + extra));
+      }
+      // Live 模式：不播报，AI 只是生成建议
     } catch (e) {
       console.error("❌ generate/speak error:", e);
     } finally {
       isSpeakingRef.current = false;
-      try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
+      if (voiceOutputMode === "AGENT") {
+        try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
+      }
     }
 
     if (mustCorrectOnce) correctedOnceRef.current = true;
@@ -356,6 +438,20 @@ Task:
         // 这里不需要再次提交，因为 finalText 已经在下面处理了
         silenceTimerRef.current = null;
       }, 1000);
+
+      // 自我语音过滤：在 Live 模式下，如果用户在读 AI 的建议，丢弃这段输入
+      if (voiceOutputMode === "LIVE") {
+        if (
+          isSimilarToLastAISuggestion(
+            finalText,
+            lastAISuggestedTextRef.current,
+            lastAISuggestedAtRef.current
+          )
+        ) {
+          // 静默丢弃，不做任何提示
+          return;
+        }
+      }
 
       // 只基于当前文本切语言（含中文才切中文）
       const want = pickASRLang(finalText);
@@ -471,6 +567,8 @@ Task:
     } else {
       safeStop();
       destroyRecognition();
+      // 停止对话时，立即停止任何正在播放的 TTS
+      stopCurrentSpeech();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive]);
@@ -534,14 +632,35 @@ Task:
     ).join("\n") || "(none)";
 
     const persona = (myName || "Speaker").trim();
-    const systemMessage = `
+    const isLiveMode = voiceOutputMode === "LIVE";
+
+    const systemMessage = isLiveMode
+      ? `
+You are my real-time conversation assistant. Provide natural English suggestions that I can say directly.
+My name is "${persona}". Always write suggestions in FIRST PERSON as ${persona} (not as an AI).
+Generate short, natural, spoken phrases (1-3 sentences) based on my notes.
+NEVER mention AI, assistant, or reveal automated help. Sound completely natural.
+`.trim()
+      : `
 You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
 Your persona name is "${persona}". Never claim to be anyone else.
 Be natural, concise, professional (1–3 sentences). Progress the talk with one crisp point.
 Do not echo my manual note verbatim; paraphrase.
 `.trim();
 
-    const userMessage = `
+    const userMessage = isLiveMode
+      ? `
+Recent lines:
+${recent}
+
+My manual note:
+${text}
+
+Task:
+Generate ONLY what I should say next in ENGLISH (1-3 natural sentences, first-person as ${persona}).
+Paraphrase my note naturally. Do not explain or add commentary.
+`.trim()
+      : `
 Recent lines:
 ${recent}
 
@@ -558,6 +677,12 @@ Task:
       const reply = await getAIResponse({ systemMessage, userMessage });
       recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
 
+      // 自我语音过滤：在 Live 模式下保存标准化的 AI 建议
+      if (isLiveMode) {
+        lastAISuggestedTextRef.current = normalize(reply);
+        lastAISuggestedAtRef.current = Date.now();
+      }
+
       // Translate AI's English reply to Chinese
       const aiZH = await toBilingual(reply).then(b => b.zh);
       const aiMsg: ChatMessage = {
@@ -569,20 +694,23 @@ Task:
       };
       setConversation((prev) => [...prev, aiMsg]);
 
-      // 播报（锁定窗口；外放多加缓冲）
-      const recog = ensureRecognition();
-      isSpeakingRef.current = true;
-      try { recog?.stop(); } catch {}
-      const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
-      const speakMs = estimateTtsMs(safeReply);
-      const extra = speakerMode ? 700 : 300;
-      await speakWithElevenLabs(safeReply);
-      await new Promise((r) => setTimeout(r, speakMs + extra));
+      // 播报（仅 Agent 模式）
+      if (voiceOutputMode === "AGENT") {
+        const recog = ensureRecognition();
+        isSpeakingRef.current = true;
+        try { recog?.stop(); } catch {}
+        const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+        const speakMs = estimateTtsMs(safeReply);
+        const extra = speakerMode ? 700 : 300;
+        await speakWithElevenLabs(safeReply);
+        await new Promise((r) => setTimeout(r, speakMs + extra));
+      }
+      // Live 模式：不播报
     } catch (e) {
       console.error(e);
     } finally {
       isSpeakingRef.current = false;
-      if (isActive) safeStart();
+      if (isActive && voiceOutputMode === "AGENT") safeStart();
     }
   };
 
@@ -590,78 +718,108 @@ Task:
     <div className="p-4 space-y-4">
       <h2 className="text-xl font-semibold">AI Secretary — Live Conversation</h2>
 
-      <MicSelector
-        className="mb-2"
-        onSelected={(id) => {
-          // 只记录，不改变原流程
-          // 未来如果用 getUserMedia 录音（非 WebSpeech），这里可以接入 deviceId
-          console.log("Preferred mic deviceId:", id);
-        }}
-      />
+      {/* 核心设置 */}
+      <div className="border rounded p-3 bg-gray-50">
+        <MicSelector
+          className="mb-3"
+          onSelected={(id) => {
+            console.log("Preferred mic deviceId:", id);
+          }}
+        />
 
-      <div className="grid gap-3 md:grid-cols-4">
-        <div>
-          <label className="block text-sm mb-1">Mode 模式</label>
-          <select
-            className="w-full border rounded px-2 py-1"
-            value={mode}
-            onChange={(e) => setMode(e.target.value)}
-            disabled={isActive}
-          >
-            <option value="face-to-face">Face to Face 当面沟通</option>
-            <option value="call-out">Call Out 主动打电话</option>
-            <option value="call-in">Call In 接听来电</option>
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-sm mb-1">My Name 我的身份</label>
-          <input
-            className="w-full border rounded px-2 py-1"
-            placeholder="例如：James的爸爸 / e.g. James' father"
-            value={myName}
-            onChange={(e) => setMyName(e.target.value)}
-            disabled={isActive || autoNameFromGuide}
-          />
-          <label className="inline-flex items-center gap-2 mt-1 text-xs">
-            <input
-              type="checkbox"
-              checked={autoNameFromGuide}
-              onChange={(e) => setAutoNameFromGuide(e.target.checked)}
+        <div className="grid gap-3 md:grid-cols-3 mb-3">
+          <div>
+            <label className="block text-sm mb-1 font-medium">Mode 场景</label>
+            <select
+              className="w-full border rounded px-2 py-1"
+              value={mode}
+              onChange={(e) => setMode(e.target.value)}
               disabled={isActive}
-            />
-            自动从 GUIDE 提取 / Auto from GUIDE
-          </label>
+            >
+              <option value="face-to-face">Face to Face 当面沟通</option>
+              <option value="call-out">Call Out (future)</option>
+              <option value="call-in">Call In (future)</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm mb-1 font-medium">Voice Output 语音输出</label>
+            <div className="flex items-center h-8">
+              <label className="inline-flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={voiceOutputMode === "AGENT"}
+                  onChange={(e) => setVoiceOutputMode(e.target.checked ? "AGENT" : "LIVE")}
+                  disabled={isActive}
+                  className="w-4 h-4"
+                />
+                <span className="text-sm">
+                  {voiceOutputMode === "AGENT" ? "ON (AI speaks)" : "OFF (you speak)"}
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div className="flex items-end">
+            <button
+              className={`w-full px-3 py-2 rounded text-white font-medium ${isActive ? "bg-red-500 hover:bg-red-600" : "bg-green-600 hover:bg-green-700"}`}
+              onClick={() => setIsActive((v) => !v)}
+            >
+              {isActive ? "停止 Stop" : "开始 Start"}
+            </button>
+          </div>
         </div>
 
-        <div>
-          <label className="block text-sm mb-1">Counterparty 对方身份</label>
-          <input
-            className="w-full border rounded px-2 py-1"
-            placeholder="例如：急诊科医生 / e.g. ER doctor"
-            value={speakerRole}
-            onChange={(e) => setSpeakerRole(e.target.value)}
-            disabled={isActive}
-          />
-        </div>
+        {/* Advanced 折叠区 */}
+        <details className="mt-2">
+          <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-800 font-medium">
+            Advanced Settings 高级设置 ▼
+          </summary>
+          <div className="mt-3 grid gap-3 md:grid-cols-2 border-t pt-3">
+            <div>
+              <label className="block text-sm mb-1">My Name 我的身份</label>
+              <input
+                className="w-full border rounded px-2 py-1 text-sm"
+                placeholder="e.g. James' father"
+                value={myName}
+                onChange={(e) => setMyName(e.target.value)}
+                disabled={isActive || autoNameFromGuide}
+              />
+              <label className="inline-flex items-center gap-2 mt-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={autoNameFromGuide}
+                  onChange={(e) => setAutoNameFromGuide(e.target.checked)}
+                  disabled={isActive}
+                />
+                Auto from GUIDE
+              </label>
+            </div>
 
-        <div className="flex items-end justify-between">
-          <label className="inline-flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={speakerMode}
-              onChange={(e) => setSpeakerMode(e.target.checked)}
-              disabled={isActive}
-            />
-            扬声器模式（防回声） / Speakerphone Mode (Echo Shield)
-          </label>
-          <button
-            className={`px-3 py-2 rounded text-white ${isActive ? "bg-red-500" : "bg-green-600"}`}
-            onClick={() => setIsActive((v) => !v)}
-          >
-            {isActive ? "停止 Stop" : "开始 Start"}
-          </button>
-        </div>
+            <div>
+              <label className="block text-sm mb-1">Counterparty 对方身份</label>
+              <input
+                className="w-full border rounded px-2 py-1 text-sm"
+                placeholder="e.g. ER doctor"
+                value={speakerRole}
+                onChange={(e) => setSpeakerRole(e.target.value)}
+                disabled={isActive}
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={speakerMode}
+                  onChange={(e) => setSpeakerMode(e.target.checked)}
+                  disabled={isActive}
+                />
+                Speakerphone Mode (Echo Shield) 扬声器模式（防回声）
+              </label>
+            </div>
+          </div>
+        </details>
       </div>
 
       <div>
@@ -739,6 +897,7 @@ Task:
           const isUser = msg.role === "user";
           const isAI = msg.role === "assistant";
           const isChinese = hasChinese(msg.contentZH);
+          const isLiveMode = voiceOutputMode === "LIVE";
 
           // Determine display order: original first, then translation
           let firstLang: string, firstContent: string;
@@ -767,16 +926,40 @@ Task:
 
           const roleLabel = isUser
             ? (msg.isManual ? `🧑 ${myName || "You"} (manual)` : "🧑 Partner")
-            : "🤖 AI";
+            : (isLiveMode ? "💡 Suggested Reply" : "🤖 AI");
 
           return (
             <div key={msg.id || idx} className="mb-3 leading-7">
-              <div className="whitespace-pre-wrap">
-                {roleLabel} ({firstLang}): {firstContent}
-              </div>
-              <div className="whitespace-pre-wrap text-gray-600">
-                {roleLabel} ({secondLang}): {secondContent}
-              </div>
+              {isAI && isLiveMode ? (
+                // Live 模式：简洁显示，像 notes
+                <>
+                  <div className="font-medium text-blue-700 mb-1">
+                    {roleLabel}:
+                  </div>
+                  <div className="whitespace-pre-wrap pl-4 border-l-2 border-blue-300 text-gray-800">
+                    {firstContent}
+                  </div>
+                  {/* 中文折叠显示（可选） */}
+                  <details className="mt-2 pl-4 text-sm">
+                    <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
+                      Show Chinese 显示中文
+                    </summary>
+                    <div className="whitespace-pre-wrap text-gray-600 mt-1">
+                      {secondContent}
+                    </div>
+                  </details>
+                </>
+              ) : (
+                // Agent 模式或用户消息：保持现有样式
+                <>
+                  <div className="whitespace-pre-wrap">
+                    {roleLabel} ({firstLang}): {firstContent}
+                  </div>
+                  <div className="whitespace-pre-wrap text-gray-600">
+                    {roleLabel} ({secondLang}): {secondContent}
+                  </div>
+                </>
+              )}
             </div>
           );
         })}
