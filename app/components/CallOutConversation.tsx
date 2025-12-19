@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { getAIResponse } from '@/lib/gpt/getAIResponse';
 import { speakWithElevenLabs } from '@/lib/voice/speakWithElevenLabs';
 import ManualInputBox from './ManualInputBox';
+import MicSelector from './MicSelector';
 
 declare global {
   interface Window {
@@ -89,6 +90,15 @@ export default function CallOutConversation() {
   return (
     <div className="space-y-4">
       <h2 className="text-lg font-semibold text-purple-700">📞 拨打电话模式</h2>
+
+      <MicSelector
+        className="mb-2"
+        onSelected={(id) => {
+          // 只记录，不改变原流程
+          // 未来如果用 getUserMedia 录音（非 WebSpeech），这里可以接入 deviceId
+          console.log("Preferred mic deviceId:", id);
+        }}
+      />
 
       <button
         onClick={() => setIsActive((v) => !v)}

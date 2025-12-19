@@ -6,6 +6,7 @@ import { speakWithElevenLabs } from "@/lib/voice/speakWithElevenLabs";
 import { toBilingual, hasChinese } from "@/lib/translate";
 import { ChatMessage } from "@/lib/types/message";
 import ManualInputBox from "./ManualInputBox";
+import MicSelector from "./MicSelector";
 
 declare global {
   interface Window {
@@ -508,6 +509,15 @@ Task:
   return (
     <div className="p-4 space-y-4">
       <h2 className="text-xl font-semibold">AI Secretary — Live Conversation</h2>
+
+      <MicSelector
+        className="mb-2"
+        onSelected={(id) => {
+          // 只记录，不改变原流程
+          // 未来如果用 getUserMedia 录音（非 WebSpeech），这里可以接入 deviceId
+          console.log("Preferred mic deviceId:", id);
+        }}
+      />
 
       <div className="grid gap-3 md:grid-cols-4">
         <div>
