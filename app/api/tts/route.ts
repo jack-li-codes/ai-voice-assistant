@@ -1,4 +1,4 @@
-export const runtime = "nodejs"; // ✅ 关键：强制 Node.js Runtime
+export const runtime = "nodejs"; // ✅ 强制 Node.js Runtime
 
 import { NextResponse } from "next/server";
 
@@ -6,13 +6,12 @@ export async function POST(req: Request) {
   try {
     const { text } = await req.json();
 
-    if (!text) {
+    if (!text || typeof text !== "string") {
       return NextResponse.json({ error: "Missing text" }, { status: 400 });
     }
 
     const apiKey = process.env.ELEVENLABS_API_KEY;
-    const voiceId =
-      process.env.ELEVENLABS_VOICE_ID || "kdmDKE6EkgrWrrykO9Qt";
+    const voiceId = process.env.ELEVENLABS_VOICE_ID || "kdmDKE6EkgrWrrykO9Qt";
 
     if (!apiKey) {
       console.error("❌ ELEVENLABS_API_KEY not set");
@@ -23,7 +22,7 @@ export async function POST(req: Request) {
     }
 
     const elevenRes = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
       {
         method: "POST",
         headers: {
@@ -33,7 +32,8 @@ export async function POST(req: Request) {
         },
         body: JSON.stringify({
           text,
-          model_id: "eleven_monolingual_v1",
+          // ✅ 更稳：通用模型，避免 monolingual 在某些账号/声音/语言下报错
+          model_id: "eleven_multilingual_v2",
           voice_settings: {
             stability: 0.4,
             similarity_boost: 0.5,
@@ -43,10 +43,18 @@ export async function POST(req: Request) {
     );
 
     if (!elevenRes.ok) {
-      const errText = await elevenRes.text();
-      console.error("❌ ElevenLabs API Error:", errText);
+      const errText = await elevenRes.text(); // ✅ 读出 ElevenLabs 原始错误
+      console.error("❌ ElevenLabs API Error:", elevenRes.status, errText);
+
+      // ✅ 关键：把真实原因返回给前端 Network -> Response
       return NextResponse.json(
-        { error: "ElevenLabs API failed" },
+        {
+          error: "ElevenLabs API failed",
+          status: elevenRes.status,
+          details: errText,
+          voiceId,
+          model_id: "eleven_multilingual_v2",
+        },
         { status: 500 }
       );
     }
@@ -60,10 +68,10 @@ export async function POST(req: Request) {
         "Cache-Control": "no-store",
       },
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("❌ TTS Route Fatal Error:", err);
     return NextResponse.json(
-      { error: "TTS internal error" },
+      { error: "TTS internal error", details: String(err?.message || err) },
       { status: 500 }
     );
   }
