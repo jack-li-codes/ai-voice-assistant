@@ -43,6 +43,17 @@ const isMeaningfulText = (t: string) => {
   return true;
 };
 
+/** 判断是否是时间戳行：---- HH:MM ---- */
+const isTimestampLine = (text: string): boolean => {
+  return /^----\s?\d{2}:\d{2}\s?----$/.test((text || "").trim());
+};
+
+/** 从时间戳行提取 HH:MM */
+const extractHHMM = (text: string): string | null => {
+  const match = (text || "").match(/(\d{2}:\d{2})/);
+  return match ? match[1] : null;
+};
+
 /** 从 GUIDE 中提取“我的名字”（可英文/中文），找不到就 null */
 function extractNameFromGuide(guide: string): string | null {
   if (!guide) return null;
@@ -162,6 +173,9 @@ function detectMisname(text: string, myName: string) {
 }
 
 /* ===================== Component ===================== */
+// 时间戳间隔常量（5分钟）
+const FIVE_MIN_MS = 5 * 60 * 1000;
+
 export default function LiveConversation() {
   // —— 表单 —— //
   const [mode, setMode] = useState("face-to-face");
@@ -184,6 +198,9 @@ export default function LiveConversation() {
   // —— 对话与控制 —— //
   const [conversation, setConversation] = useState<ChatMessage[]>([]);
   const [isActive, setIsActive] = useState(false);
+
+  // Notes 模式：自动时间戳
+  const lastTimestampRef = useRef<number>(0);
 
   // 识别/播报控制
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -219,6 +236,46 @@ export default function LiveConversation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [background, autoNameFromGuide]);
 
+  /* 检查并插入时间戳（仅 Notes 模式） */
+  const maybeInsertTimestamp = (forceIfAfter30s = false) => {
+    if (mode !== "notes") return;
+
+    const now = Date.now();
+    const elapsed = now - lastTimestampRef.current;
+
+    // 任务 2：手动插入时间戳（30 秒间隔限制）
+    if (forceIfAfter30s) {
+      if (lastTimestampRef.current !== 0 && elapsed < 30000) {
+        console.log("[Notes] 距离上次时间戳不足 30 秒，跳过插入");
+        return;
+      }
+      // 继续执行插入逻辑
+    } else {
+      // 自动插入：首次或超过 5 分钟才插入
+      if (lastTimestampRef.current !== 0 && elapsed < FIVE_MIN_MS) {
+        return;
+      }
+    }
+
+    // 统一的时间戳插入逻辑
+    const timeStr = new Date(now).toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+
+    const timestampMsg: ChatMessage = {
+      id: `timestamp-${now}`,
+      role: "user", // 使用 user role，但通过内容格式识别
+      contentEN: `---- ${timeStr} ----`,
+      contentZH: `---- ${timeStr} ----`,
+      timestamp: now,
+    };
+
+    setConversation((prev) => [...prev, timestampMsg]);
+    lastTimestampRef.current = now;
+  };
+
   /* 统一提交入口：防止空提交产生 "noted" */
   const finalizeAndSubmit = async (text: string, reason: string) => {
     if (!isMeaningfulText(text)) {
@@ -233,7 +290,35 @@ export default function LiveConversation() {
       silenceTimerRef.current = null;
     }
 
-    // 回声过滤：与最近 AI 回复高度相似 -> 丢弃
+    // Notes 模式：只做回声过滤（更宽松），然后仅保存转写，不调用 AI
+    const isNotesMode = mode === "notes";
+
+    if (isNotesMode) {
+      // Notes 模式下也做回声过滤，防止重复保存
+      const echoThreshold = 0.50; // 宽松阈值
+      if (isEchoOfAI(text, recentAIRef.current, echoThreshold)) {
+        console.log("[Notes] skip (echo detected)", { reason, text });
+        return;
+      }
+
+      // 插入时间戳（如果需要）
+      maybeInsertTimestamp();
+
+      // 只保存转写，不调用 AI
+      const partnerBilingual = await toBilingual(text);
+      const partnerMsg: ChatMessage = {
+        id: `partner-${Date.now()}`,
+        role: "user",
+        contentEN: partnerBilingual.en,
+        contentZH: partnerBilingual.zh,
+        timestamp: Date.now(),
+      };
+      setConversation((prev) => [...prev, partnerMsg]);
+      console.log("[Notes] transcript saved:", text);
+      return; // 不调用 AI
+    }
+
+    // 非 Notes 模式：常规回声过滤
     const echoThreshold = speakerMode ? 0.50 : 0.55;
     if (isEchoOfAI(text, recentAIRef.current, echoThreshold)) {
       console.log("[ASR] skip submit (echo detected)", { reason, text });
@@ -569,6 +654,11 @@ Task:
       destroyRecognition();
       // 停止对话时，立即停止任何正在播放的 TTS
       stopCurrentSpeech();
+
+      // 任务 3：Stop 时重置 Notes 会话状态
+      if (mode === "notes") {
+        lastTimestampRef.current = 0;
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive]);
@@ -579,6 +669,11 @@ Task:
 
     // Format bilingual messages for export
     const content = conversation.map(msg => {
+      // 时间戳消息
+      if (isTimestampLine(msg.contentEN)) {
+        return `\n${msg.contentEN}\n`;
+      }
+
       const role = msg.role === "user" ? "🧑 You" : "🤖 AI";
       const isChinese = hasChinese(msg.contentZH);
       // Show original language first, then translation
@@ -610,9 +705,82 @@ Task:
     URL.revokeObjectURL(url);
   };
 
+  // 导出对话记录为 .md 文件（Markdown 格式，仅 Notes 模式）
+  const exportConversationMarkdown = () => {
+    if (conversation.length === 0) return;
+
+    const now = new Date();
+    const dateStr = now.toISOString().split("T")[0]; // YYYY-MM-DD
+    const timestamp = now
+      .toISOString()
+      .replace(/T/, "-")
+      .replace(/:/g, "-")
+      .split(".")[0];
+
+    // Markdown header
+    let content = `# AI Secretary – Notes\nDate: ${dateStr}\n\n`;
+
+    // 当前时间戳标题（用于分组）
+    let currentTimeHeader = "";
+
+    conversation.forEach((msg) => {
+      // 时间戳消息：提取时间并设为新的 section header
+      if (isTimestampLine(msg.contentEN)) {
+        const time = extractHHMM(msg.contentEN);
+        if (time) {
+          currentTimeHeader = time;
+          content += `\n## ${currentTimeHeader}\n\n`;
+        }
+        return;
+      }
+
+      // 如果还没有时间戳 header，创建一个默认的
+      if (!currentTimeHeader) {
+        currentTimeHeader = "Session";
+        content += `## ${currentTimeHeader}\n\n`;
+      }
+
+      // Transcript 消息
+      if (msg.role === "user") {
+        const isChinese = hasChinese(msg.contentZH);
+        // 双语 bullet points
+        if (isChinese) {
+          content += `- 🇨🇳 ${msg.contentZH}\n`;
+          content += `- 🇺🇸 ${msg.contentEN}\n`;
+        } else {
+          content += `- 🇺🇸 ${msg.contentEN}\n`;
+          content += `- 🇨🇳 ${msg.contentZH}\n`;
+        }
+        content += "\n";
+      }
+      // AI 消息（Notes 模式下通常没有，但为了完整性保留）
+      else if (msg.role === "assistant") {
+        content += `**AI Reply:**\n- 🇺🇸 ${msg.contentEN}\n- 🇨🇳 ${msg.contentZH}\n\n`;
+      }
+    });
+
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ai-secretary-notes-${timestamp}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    URL.revokeObjectURL(url);
+  };
+
   // 手动输入：不播报手动文本
   const handleManualSend = async (text: string) => {
     if (!text?.trim()) return;
+
+    // Notes 模式：插入时间戳（如果需要）
+    const isNotesMode = mode === "notes";
+    if (isNotesMode) {
+      maybeInsertTimestamp();
+    }
 
     // Create bilingual message for manual input
     const manualBilingual = await toBilingual(text);
@@ -626,6 +794,12 @@ Task:
     };
     setConversation((prev) => [...prev, manualMsg]);
     manualInputsRef.current = [text, ...manualInputsRef.current].slice(0, 5);
+
+    // Notes 模式：仅保存手动输入，不调用 AI
+    if (isNotesMode) {
+      console.log("[Notes] manual input saved:", text);
+      return; // 不调用 AI
+    }
 
     const recent = conversation.slice(-4).map(msg =>
       `${msg.role === 'user' ? `🧑 ${myName || "Me"}` : '🤖 AI'}: ${msg.contentEN}`
@@ -739,24 +913,31 @@ Task:
               <option value="face-to-face">Face to Face 当面沟通</option>
               <option value="call-out">Call Out (future)</option>
               <option value="call-in">Call In (future)</option>
+              <option value="notes">Notes (Silent Transcript)</option>
             </select>
           </div>
 
           <div>
             <label className="block text-sm mb-1 font-medium">Voice Output 语音输出</label>
             <div className="flex items-center h-8">
-              <label className="inline-flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={voiceOutputMode === "AGENT"}
-                  onChange={(e) => setVoiceOutputMode(e.target.checked ? "AGENT" : "LIVE")}
-                  disabled={isActive}
-                  className="w-4 h-4"
-                />
-                <span className="text-sm">
-                  {voiceOutputMode === "AGENT" ? "ON (AI speaks)" : "OFF (you speak)"}
+              {mode === "notes" ? (
+                <span className="text-sm text-gray-600 italic">
+                  Notes mode: text only 📝
                 </span>
-              </label>
+              ) : (
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={voiceOutputMode === "AGENT"}
+                    onChange={(e) => setVoiceOutputMode(e.target.checked ? "AGENT" : "LIVE")}
+                    disabled={isActive}
+                    className="w-4 h-4"
+                  />
+                  <span className="text-sm">
+                    {voiceOutputMode === "AGENT" ? "ON (AI speaks)" : "OFF (you speak)"}
+                  </span>
+                </label>
+              )}
             </div>
           </div>
 
@@ -883,21 +1064,55 @@ Task:
 
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-medium">对话记录 Conversation</h3>
-        <button
-          className="px-3 py-1 rounded text-sm bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          onClick={exportConversation}
-          disabled={conversation.length === 0}
-        >
-          导出为文本 Export .txt
-        </button>
+        <div className="flex gap-2">
+          {/* 任务 2：手动插入时间戳按钮（仅 Notes 模式） */}
+          {mode === "notes" && (
+            <button
+              className="px-3 py-1 rounded text-sm bg-yellow-500 text-white hover:bg-yellow-600"
+              onClick={() => maybeInsertTimestamp(true)}
+            >
+              🕒 Insert Timestamp
+            </button>
+          )}
+          <button
+            className="px-3 py-1 rounded text-sm bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={exportConversation}
+            disabled={conversation.length === 0}
+          >
+            导出为文本 Export .txt
+          </button>
+          {mode === "notes" && (
+            <button
+              className="px-3 py-1 rounded text-sm bg-green-500 text-white hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={exportConversationMarkdown}
+              disabled={conversation.length === 0}
+            >
+              导出 Markdown Export .md
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="border rounded p-3 bg-white">
         {conversation.map((msg, idx) => {
+          // 时间戳消息特殊处理
+          if (isTimestampLine(msg.contentEN)) {
+            // 任务 1：提取并优化时间戳显示
+            const timeStr = extractHHMM(msg.contentEN);
+            return (
+              <div key={msg.id || idx} className="my-4 text-center">
+                <div className="inline-block px-4 py-1 bg-gray-200 text-gray-700 rounded-full text-sm font-medium">
+                  🕒 {timeStr || msg.contentEN}
+                </div>
+              </div>
+            );
+          }
+
           const isUser = msg.role === "user";
           const isAI = msg.role === "assistant";
           const isChinese = hasChinese(msg.contentZH);
           const isLiveMode = voiceOutputMode === "LIVE";
+          const isNotesMode = mode === "notes";
 
           // Determine display order: original first, then translation
           let firstLang: string, firstContent: string;
@@ -924,7 +1139,10 @@ Task:
             }
           }
 
-          const roleLabel = isUser
+          // Notes 模式：添加 📝 图标
+          const roleLabel = isNotesMode && isUser
+            ? (msg.isManual ? `📝 ${myName || "You"} (manual)` : "📝 Transcript")
+            : isUser
             ? (msg.isManual ? `🧑 ${myName || "You"} (manual)` : "🧑 Partner")
             : (isLiveMode ? "💡 Suggested Reply" : "🤖 AI");
 
@@ -949,8 +1167,18 @@ Task:
                     </div>
                   </details>
                 </>
+              ) : isNotesMode && isUser ? (
+                // Notes 模式：简洁双语显示
+                <>
+                  <div className="whitespace-pre-wrap">
+                    {roleLabel} ({firstLang}): {firstContent}
+                  </div>
+                  <div className="whitespace-pre-wrap text-gray-600">
+                    {roleLabel} ({secondLang}): {secondContent}
+                  </div>
+                </>
               ) : (
-                // Agent 模式或用户消息：保持现有样式
+                // Agent 模式或其他：保持现有样式
                 <>
                   <div className="whitespace-pre-wrap">
                     {roleLabel} ({firstLang}): {firstContent}
