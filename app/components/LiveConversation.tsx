@@ -185,6 +185,9 @@ export default function LiveConversation() {
   // Voice Output Mode: "LIVE" = 你说 (TTS OFF), "AGENT" = AI说 (TTS ON)
   const [voiceOutputMode, setVoiceOutputMode] = useState<"LIVE" | "AGENT">("LIVE");
 
+  // Active Speaker (Face-to-Face mode only): who is speaking now
+  const [activeSpeaker, setActiveSpeaker] = useState<"partner" | "me">("partner");
+
   // UI 折叠控制
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -303,6 +306,25 @@ export default function LiveConversation() {
       silenceTimerRef.current = null;
     }
 
+    // Face-to-Face 模式：如果当前说话的是"我"，只记录不触发 AI
+    const isFaceToFace = mode === "face-to-face";
+    if (isFaceToFace && activeSpeaker === "me") {
+      console.log("[Face-to-Face] Speaker is 'me', record only (no AI response)", { reason, text });
+
+      // 可选：记录"我"说的话（根据需求，这里暂时记录）
+      const myBilingual = await toBilingual(text);
+      const myMsg: ChatMessage = {
+        id: `me-${Date.now()}`,
+        role: "user",
+        contentEN: myBilingual.en,
+        contentZH: myBilingual.zh,
+        timestamp: Date.now(),
+        speaker: "me",
+      };
+      setConversation((prev) => [...prev, myMsg]);
+      return; // 不触发 AI 提词
+    }
+
     // Notes 模式：只做回声过滤（更宽松），然后仅保存转写，不调用 AI
     const isNotesMode = mode === "notes";
 
@@ -339,18 +361,35 @@ export default function LiveConversation() {
     }
 
     // Create bilingual message for partner's speech
-    const partnerBilingual = await toBilingual(text);
-    const partnerMsg: ChatMessage = {
-      id: `partner-${Date.now()}`,
-      role: "user",
-      contentEN: partnerBilingual.en,
-      contentZH: partnerBilingual.zh,
-      timestamp: Date.now(),
-    };
+    // 优化：Face-to-Face LIVE 模式下跳过 toBilingual 以减少延迟
+    const isLiveMode = voiceOutputMode === "LIVE";
+    const shouldSkipTranslation = isFaceToFace && isLiveMode;
+
+    let partnerMsg: ChatMessage;
+    if (shouldSkipTranslation) {
+      // 直接使用原文，不翻译（节省一次 OpenAI 调用）
+      partnerMsg = {
+        id: `partner-${Date.now()}`,
+        role: "user",
+        contentEN: text,
+        contentZH: text, // 暂时使用相同文本，或者可以留空
+        timestamp: Date.now(),
+        speaker: "partner",
+      };
+    } else {
+      const partnerBilingual = await toBilingual(text);
+      partnerMsg = {
+        id: `partner-${Date.now()}`,
+        role: "user",
+        contentEN: partnerBilingual.en,
+        contentZH: partnerBilingual.zh,
+        timestamp: Date.now(),
+        speaker: "partner",
+      };
+    }
     setConversation((prev) => [...prev, partnerMsg]);
 
     // —— LIVE 模式下，如果 Auto suggestions 关闭，则只保存转写，不生成 AI 回复 —— //
-    const isLiveMode = voiceOutputMode === "LIVE";
     if (isLiveMode && !autoSuggestEnabled) {
       console.log("[LIVE] auto-suggest disabled, skip AI response");
       return;
@@ -1016,7 +1055,8 @@ Avoid questions. Stay consistent with the conversation. No new topics.
           }}
         />
 
-        <div className="grid gap-3 md:grid-cols-3 mb-3">
+        {/* 主控制行 */}
+        <div className="grid gap-3 md:grid-cols-2 mb-3">
           <div>
             <label className="block text-sm mb-1 font-medium">Mode 场景</label>
             <select
@@ -1055,15 +1095,51 @@ Avoid questions. Stay consistent with the conversation. No new topics.
               )}
             </div>
           </div>
+        </div>
 
-          <div className="flex items-end">
-            <button
-              className={`w-full px-3 py-2 rounded text-white font-medium ${isActive ? "bg-red-500 hover:bg-red-600" : "bg-green-600 hover:bg-green-700"}`}
-              onClick={() => setIsActive((v) => !v)}
-            >
-              {isActive ? "停止 Stop" : "开始 Start"}
-            </button>
+        {/* Speaking now 切换控件 - 仅在 Face-to-Face 模式显示 */}
+        {mode === "face-to-face" && (
+          <div className="mb-3">
+            <label className="block text-sm mb-1 font-medium">
+              Speaking now 当前说话方
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className={`flex-1 px-3 py-1.5 text-sm rounded border ${
+                  activeSpeaker === "partner"
+                    ? "bg-blue-500 text-white border-blue-600"
+                    : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                }`}
+                onClick={() => setActiveSpeaker("partner")}
+                disabled={isActive}
+              >
+                Other person 对方
+              </button>
+              <button
+                type="button"
+                className={`flex-1 px-3 py-1.5 text-sm rounded border ${
+                  activeSpeaker === "me"
+                    ? "bg-blue-500 text-white border-blue-600"
+                    : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                }`}
+                onClick={() => setActiveSpeaker("me")}
+                disabled={isActive}
+              >
+                Me 我
+              </button>
+            </div>
           </div>
+        )}
+
+        {/* Start/Stop 按钮 */}
+        <div className="mb-3">
+          <button
+            className={`w-full px-3 py-2 rounded text-white font-medium ${isActive ? "bg-red-500 hover:bg-red-600" : "bg-green-600 hover:bg-green-700"}`}
+            onClick={() => setIsActive((v) => !v)}
+          >
+            {isActive ? "停止 Stop" : "开始 Start"}
+          </button>
         </div>
 
         {/* Auto suggestions 开关 - 仅在 LIVE 模式且非 Notes 模式时显示 */}
