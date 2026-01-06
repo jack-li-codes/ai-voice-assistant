@@ -2,6 +2,9 @@
   "name": "ai-voice-assistant",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "dotenv -e .env.local next dev",
     "build": "next build",
