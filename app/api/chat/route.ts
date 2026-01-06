@@ -1,5 +1,7 @@
 // app/api/chat/route.ts
 
+export const runtime = "nodejs"; // ✅ 强制 Node.js Runtime（使用AbortSignal.timeout需要Node.js）
+
 export async function POST(req: Request) {
   try {
     const { messages } = await req.json();
