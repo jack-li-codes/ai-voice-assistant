@@ -10,13 +10,13 @@ export async function getAIResponse({
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gpt-4',
+      model: 'gpt-4o-mini', // 更快的模型，降低延迟
       messages: [
         { role: 'system', content: systemMessage },
         { role: 'user', content: userMessage },
       ],
-      // 如需更稳，可调低温度：
-      // temperature: 0.5,
+      max_tokens: 150, // 限制输出长度，缩短等待时间
+      temperature: 0.7, // 保持自然响应
     }),
   });
 

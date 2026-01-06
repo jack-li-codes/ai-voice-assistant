@@ -11,6 +11,7 @@ export interface ChatMessage {
   contentZH: string;               // Chinese content
   timestamp?: number;              // Optional timestamp
   isManual?: boolean;              // Whether this is a manual input (vs voice)
+  speaker?: "me" | "partner";      // Who spoke (for face-to-face mode)
 }
 
 /**
