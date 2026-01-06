@@ -25,6 +25,11 @@ function ManualInputBox({ onSend }: Props) {
     // Shift + Enter allows default behavior (newline)
   };
 
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // 允许默认粘贴行为，不做任何阻止
+    // 如果需要处理粘贴内容，可以在这里添加逻辑
+  };
+
   return (
     <div className="mt-4 border-t pt-4">
       <label className="block font-medium mb-1">人工输入（可覆盖 AI 回答）</label>
@@ -38,6 +43,7 @@ function ManualInputBox({ onSend }: Props) {
           value={manualInput}
           onChange={(e) => setManualInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           rows={1}
         />
         <button

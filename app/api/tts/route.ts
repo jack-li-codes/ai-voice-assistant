@@ -39,6 +39,7 @@ export async function POST(req: Request) {
             similarity_boost: 0.5,
           },
         }),
+        signal: AbortSignal.timeout(30000), // 30 second timeout
       }
     );
 
@@ -59,12 +60,26 @@ export async function POST(req: Request) {
       );
     }
 
-    const audioBuffer = await elevenRes.arrayBuffer();
+    // ✅ Stream audio directly - starts playing immediately
+    if (elevenRes.body) {
+      return new NextResponse(elevenRes.body, {
+        status: 200,
+        headers: {
+          "Content-Type": "audio/mpeg",
+          "Cache-Control": "no-store",
+          "Transfer-Encoding": "chunked",
+        },
+      });
+    }
 
+    // Fallback: if body is null, buffer the response
+    console.warn("⚠️ elevenRes.body is null, falling back to arrayBuffer");
+    const audioBuffer = await elevenRes.arrayBuffer();
     return new NextResponse(audioBuffer, {
       status: 200,
       headers: {
         "Content-Type": "audio/mpeg",
+        "Content-Length": audioBuffer.byteLength.toString(),
         "Cache-Control": "no-store",
       },
     });
@@ -76,3 +91,4 @@ export async function POST(req: Request) {
     );
   }
 }
+
