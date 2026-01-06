@@ -7,6 +7,7 @@ import { toBilingual, hasChinese } from "@/lib/translate";
 import { ChatMessage } from "@/lib/types/message";
 import ManualInputBox from "./ManualInputBox";
 import MicSelector from "./MicSelector";
+import { buildInterviewMeetingPrompt } from "@/ai-calls/templates/interviewMeeting";
 
 declare global {
   interface Window {
@@ -203,6 +204,9 @@ export default function LiveConversation() {
   const conversationRef = useRef<ChatMessage[]>([]);
   const [isActive, setIsActive] = useState(false);
 
+  // Interim caption (Zoom-like live caption while speaking)
+  const [liveCaption, setLiveCaption] = useState("");
+
   // —— 🪄 Suggested Line —— //
   const [pendingLines, setPendingLines] = useState<string[]>([]);
   const [isGeneratingLine, setIsGeneratingLine] = useState(false);
@@ -235,9 +239,41 @@ export default function LiveConversation() {
   const listeningResumedAtRef = useRef<number>(0);
   const markListeningResumed = () => { listeningResumedAtRef.current = Date.now(); };
 
+  // 安全重启识别（throttle：立即 start，250ms 内拒绝重复）
+  const safeStartRecognition = (r?: SpeechRecognition | null) => {
+    if (restartingRef.current) return;
+    restartingRef.current = true;
+
+    try {
+      const recog = r || recognitionRef.current;
+      recog?.start();
+      markListeningResumed();
+    } catch {}
+
+    setTimeout(() => {
+      restartingRef.current = false;
+    }, 250);
+  };
+
   // 自我语音过滤：记录最近的 AI 建议文本（Live 模式专用）
   const lastAISuggestedTextRef = useRef<string>("");
   const lastAISuggestedAtRef = useRef<number>(0);
+
+  // Delivery Guardrail refs (Face-to-Face 防反哺)
+  const lastSuggestionAtRef = useRef<number>(0);
+  const lastSuggestionTextRef = useRef<string>("");
+
+  // Backpressure refs (防堵死)
+  const isGeneratingRef = useRef(false);
+  const pendingPartnerTextRef = useRef<string | null>(null);
+
+  // Watchdog: track when locks were set (for emergency unlock)
+  const generationStartedAtRef = useRef<number>(0);
+  const speakingStartedAtRef = useRef<number>(0);
+  const watchdogTimerRef = useRef<number | null>(null);
+
+  // SpeechRecognition restart debounce (防抖)
+  const restartingRef = useRef(false);
 
   // 根据 GUIDE 自动更新名字（可关闭）
   useEffect(() => {
@@ -306,8 +342,27 @@ export default function LiveConversation() {
       silenceTimerRef.current = null;
     }
 
-    // Face-to-Face 模式：如果当前说话的是"我"，只记录不触发 AI
+    // A) Delivery Guardrail (防反哺)
     const isFaceToFace = mode === "face-to-face";
+    if (
+      isFaceToFace &&
+      activeSpeaker === "partner" &&
+      autoSuggestEnabled &&
+      lastSuggestionTextRef.current
+    ) {
+      const timeSinceLastSuggestion = Date.now() - lastSuggestionAtRef.current;
+      if (timeSinceLastSuggestion < 9000) {
+        const set1 = tokenSet(text);
+        const set2 = tokenSet(lastSuggestionTextRef.current);
+        const similarity = jaccard(set1, set2);
+        if (similarity > 0.30) {
+          console.log(`[Guardrail] ignore as delivery: ${text.slice(0, 60)}`);
+          return;
+        }
+      }
+    }
+
+    // Face-to-Face 模式：如果当前说话的是"我"，只记录不触发 AI
     if (isFaceToFace && activeSpeaker === "me") {
       console.log("[Face-to-Face] Speaker is 'me', record only (no AI response)", { reason, text });
 
@@ -395,19 +450,106 @@ export default function LiveConversation() {
       return;
     }
 
+    // B) Backpressure (防堵死)
+    if (isFaceToFace && activeSpeaker === "partner") {
+      if (isGeneratingRef.current) {
+        pendingPartnerTextRef.current = text;
+        console.log(`[Backpressure] AI is busy, queuing latest input: ${text.slice(0, 60)}`);
+        return;
+      }
+      isGeneratingRef.current = true;
+      generationStartedAtRef.current = Date.now(); // Track when generation started
+    }
+
     // —— 名字误叫，仅纠一次 —— //
     const mustCorrectOnce = detectMisname(text, myName) && !correctedOnceRef.current;
 
-    // —— 轻量上下文 —— //
-    const recent = conversation.slice(-4).map(msg =>
-      `${msg.role === 'user' ? '🧑 Partner' : '🤖 AI'}: ${msg.contentEN}`
-    ).join("\n") || "(none)";
+    // ===== 最外层 try/finally：确保 cleanup 永远执行 =====
+    try {
 
-    // —— 系统提示（动态身份 + 英文 + 模式区分） —— //
-    const persona = (myName || "Speaker").trim();
+      // —— 轻量上下文 —— //
+      const recent = conversation.slice(-4).map(msg =>
+        `${msg.role === 'user' ? '🧑 Partner' : '🤖 AI'}: ${msg.contentEN}`
+      ).join("\n") || "(none)";
 
-    const systemMessage = isLiveMode
-      ? `
+      // —— 系统提示（动态身份 + 英文 + 模式区分） —— //
+      const persona = (myName || "Speaker").trim();
+
+      // 面试/会议模式：使用专门的 prompt 模板
+      let interviewMeetingHandled = false;
+      if (mode === "interview-meeting") {
+        const prompt = buildInterviewMeetingPrompt({
+          persona,
+          background: background || undefined,
+          recentConversation: recent,
+          partnerQuestion: text,
+        });
+        const systemMessage = prompt.systemMessage;
+        const userMessage = prompt.userMessage;
+
+        try {
+          const reply = await getAIResponse({ systemMessage, userMessage });
+
+          // 记录最近 3 条 AI 回复，供回声过滤
+          recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
+
+          // 自我语音过滤：在 Live 模式下保存标准化的 AI 建议
+          if (isLiveMode) {
+            lastAISuggestedTextRef.current = normalize(reply);
+            lastAISuggestedAtRef.current = Date.now();
+          }
+
+          // Translate AI's English reply to Chinese
+          const aiZH = await toBilingual(reply).then(b => b.zh);
+          const aiMsg: ChatMessage = {
+            id: `ai-${Date.now()}`,
+            role: "assistant",
+            contentEN: reply,
+            contentZH: aiZH,
+            timestamp: Date.now(),
+          };
+          setConversation((prev) => [...prev, aiMsg]);
+
+          // Update Delivery Guardrail refs
+          lastSuggestionAtRef.current = Date.now();
+          lastSuggestionTextRef.current = reply;
+
+          // 标记已处理，避免双回复
+          interviewMeetingHandled = true;
+
+          // —— 播报窗口锁定（仅 Agent 模式） —— //
+          if (voiceOutputMode === "AGENT") {
+            try {
+              const recog2 = recognitionRef.current;
+              const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+              const speakMs = estimateTtsMs(safeReply);
+              const extra = speakerMode ? 700 : 300;
+              isSpeakingRef.current = true;
+              speakingStartedAtRef.current = Date.now(); // Track when speaking started
+              try {
+                recog2?.stop();
+              } catch {}
+              await speakWithElevenLabs(safeReply);
+              await new Promise((r) => setTimeout(r, speakMs + extra));
+            } catch (ttsError) {
+              console.error("[Interview-meeting] TTS error:", ttsError);
+              // TTS 失败不影响主流程，已经成功生成回复
+            } finally {
+              isSpeakingRef.current = false;
+              speakingStartedAtRef.current = 0;
+            }
+          }
+          // Live 模式：不播报，只显示提词
+        } catch (e) {
+          console.error("Interview meeting prompt error:", e);
+          // 如果出错，fallback 到通用逻辑
+        }
+      }
+
+      if (!interviewMeetingHandled) {
+      // 通用模式：原有的 prompt 逻辑
+      const systemMessage = isLiveMode
+        ? `
 You are my real-time conversation assistant. Provide natural English suggestions that I can say directly.
 My name is "${persona}". Always write suggestions in FIRST PERSON as ${persona} (not as an AI).
 Generate short, natural, spoken phrases (1-3 sentences) that sound like a real person talking.
@@ -424,7 +566,7 @@ Context:
 - Mode: ${mode || "N/A"}
 - Counterparty: ${speakerRole || "N/A"}
 `.trim()
-      : `
+        : `
 You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
 Your persona name is "${persona}". NEVER claim to be anyone else.
 If the partner misnames you, correct ONCE with: "Hi — this is ${persona}." then continue.
@@ -440,8 +582,8 @@ Context:
 - Counterparty: ${speakerRole || "N/A"}
 `.trim();
 
-    const userMessage = isLiveMode
-      ? `
+      const userMessage = isLiveMode
+        ? `
 Recent lines:
 ${recent}
 
@@ -452,7 +594,7 @@ Task:
 Generate ONLY what I should say next in ENGLISH (1-3 natural sentences, first-person as ${persona}).
 Do not explain or add commentary. Just provide the suggested reply I can read aloud.
 `.trim()
-      : `
+        : `
 Recent lines:
 ${recent}
 
@@ -465,56 +607,85 @@ Task:
 3) Paraphrase; do not mirror the user's words.
 `.trim();
 
-    let finalUserMessage = userMessage;
-    if (mustCorrectOnce) {
-      finalUserMessage += `\nAlso: Begin with exactly: "Hi — this is ${persona}." once, then continue.`;
-    }
-
-    try {
-      const reply = await getAIResponse({ systemMessage, userMessage: finalUserMessage });
-
-      // 记录最近 3 条 AI 回复，供回声过滤
-      recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
-
-      // 自我语音过滤：在 Live 模式下保存标准化的 AI 建议
-      if (isLiveMode) {
-        lastAISuggestedTextRef.current = normalize(reply);
-        lastAISuggestedAtRef.current = Date.now();
+      let finalUserMessage = userMessage;
+      if (mustCorrectOnce) {
+        finalUserMessage += `\nAlso: Begin with exactly: "Hi — this is ${persona}." once, then continue.`;
       }
 
-      // Translate AI's English reply to Chinese
-      const aiZH = await toBilingual(reply).then(b => b.zh);
-      const aiMsg: ChatMessage = {
-        id: `ai-${Date.now()}`,
-        role: "assistant",
-        contentEN: reply,
-        contentZH: aiZH,
-        timestamp: Date.now(),
-      };
-      setConversation((prev) => [...prev, aiMsg]);
+      try {
+        const reply = await getAIResponse({ systemMessage, userMessage: finalUserMessage });
 
-      // —— 播报窗口锁定（仅 Agent 模式） —— //
-      if (voiceOutputMode === "AGENT") {
-        const recog2 = recognitionRef.current;
-        const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
-        const speakMs = estimateTtsMs(safeReply);
-        const extra = speakerMode ? 700 : 300;
-        isSpeakingRef.current = true;
-        try { recog2?.stop(); } catch {}
-        await speakWithElevenLabs(safeReply);
-        await new Promise((r) => setTimeout(r, speakMs + extra));
+        // 记录最近 3 条 AI 回复，供回声过滤
+        recentAIRef.current = [reply, ...recentAIRef.current].slice(0, 3);
+
+        // 自我语音过滤：在 Live 模式下保存标准化的 AI 建议
+        if (isLiveMode) {
+          lastAISuggestedTextRef.current = normalize(reply);
+          lastAISuggestedAtRef.current = Date.now();
+        }
+
+        // Translate AI's English reply to Chinese
+        const aiZH = await toBilingual(reply).then(b => b.zh);
+        const aiMsg: ChatMessage = {
+          id: `ai-${Date.now()}`,
+          role: "assistant",
+          contentEN: reply,
+          contentZH: aiZH,
+          timestamp: Date.now(),
+        };
+        setConversation((prev) => [...prev, aiMsg]);
+
+        // Update Delivery Guardrail refs
+        lastSuggestionAtRef.current = Date.now();
+        lastSuggestionTextRef.current = reply;
+
+        // —— 播报窗口锁定（仅 Agent 模式） —— //
+        if (voiceOutputMode === "AGENT") {
+          try {
+            const recog2 = recognitionRef.current;
+            const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+            const speakMs = estimateTtsMs(safeReply);
+            const extra = speakerMode ? 700 : 300;
+            isSpeakingRef.current = true;
+            speakingStartedAtRef.current = Date.now(); // Track when speaking started
+            try { recog2?.stop(); } catch {}
+            await speakWithElevenLabs(safeReply);
+            await new Promise((r) => setTimeout(r, speakMs + extra));
+          } catch (ttsError) {
+            console.error("[Generic] TTS error:", ttsError);
+            // TTS 失败不影响主流程
+          } finally {
+            isSpeakingRef.current = false;
+            speakingStartedAtRef.current = 0;
+          }
+        }
+        // Live 模式：不播报，AI 只是生成建议
+      } catch (e) {
+        console.error("❌ generate/speak error:", e);
       }
-      // Live 模式：不播报，AI 只是生成建议
-    } catch (e) {
-      console.error("❌ generate/speak error:", e);
+      } // end if (!interviewMeetingHandled)
+
     } finally {
+      // ===== Unified cleanup - ALWAYS executes =====
       isSpeakingRef.current = false;
+      speakingStartedAtRef.current = 0;
       if (voiceOutputMode === "AGENT") {
-        try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
+        safeStartRecognition();
       }
-    }
 
-    if (mustCorrectOnce) correctedOnceRef.current = true;
+      // Backpressure: process pending input
+      isGeneratingRef.current = false;
+      generationStartedAtRef.current = 0;
+      const pending = pendingPartnerTextRef.current;
+      if (pending) {
+        pendingPartnerTextRef.current = null;
+        console.log(`[Backpressure] processing pending input: ${pending.slice(0, 60)}`);
+        // 异步调用,避免阻塞
+        setTimeout(() => finalizeAndSubmit(pending, "backpressure-pending"), 0);
+      }
+
+      if (mustCorrectOnce) correctedOnceRef.current = true;
+    }
   };
 
   /* 识别器 */
@@ -548,6 +719,21 @@ Task:
         window.clearTimeout(silenceTimerRef.current);
       }
 
+      // Process INTERIM results for live caption (Zoom-like)
+      let interimText = "";
+      for (let i = event.results.length - 1; i >= 0; i--) {
+        const res: any = event.results[i];
+        if (!res.isFinal) {
+          interimText = res[0]?.transcript?.trim?.() || "";
+          if (interimText) break;
+        }
+      }
+
+      // Update live caption with interim text
+      if (interimText) {
+        setLiveCaption(interimText);
+      }
+
       // 取最后一个 isFinal=true 的结果
       let finalText = "";
       for (let i = event.results.length - 1; i >= 0; i--) {
@@ -567,6 +753,9 @@ Task:
         }, 1000);
         return;
       }
+
+      // Clear live caption when final result arrives
+      setLiveCaption("");
 
       // 启动抖动保护：启动后 800ms 内的短文本直接忽略
       const now = Date.now();
@@ -601,7 +790,7 @@ Task:
       if (recog.lang !== want) {
         try { recog.stop(); } catch {}
         recog.lang = want;
-        try { recog.start(); markListeningResumed(); } catch {}
+        safeStartRecognition(recog);
       }
 
       // 去重：和上次"最终文本"几乎一致就丢弃
@@ -619,10 +808,20 @@ Task:
     };
 
     recog.onerror = (e: any) => {
-      console.error("recognition.onerror:", e?.error || e);
+      const errorType = e?.error;
+      console.warn("[SR] recognition.onerror:", errorType || e);
+
+      // Handle specific errors that can be recovered
+      if (errorType === "aborted" || errorType === "audio-capture") {
+        if (isActive) {
+          console.warn(`[SR] restarting after ${errorType} error...`);
+          safeStartRecognition();
+        }
+      }
     };
 
     recog.onend = () => {
+      console.log("[SR] recognition ended");
       // 清理静音计时器
       if (silenceTimerRef.current) {
         window.clearTimeout(silenceTimerRef.current);
@@ -630,7 +829,8 @@ Task:
       }
       // 重启识别（如果还在活跃状态）
       if (isActive && !isSpeakingRef.current) {
-        try { recognitionRef.current?.start(); markListeningResumed(); } catch {}
+        console.log("[SR] auto-restarting...");
+        safeStartRecognition();
       }
     };
 
@@ -644,7 +844,8 @@ Task:
       window.clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
-    try { ensureRecognition()?.start(); markListeningResumed(); } catch {}
+    const recog = ensureRecognition();
+    if (recog) safeStartRecognition(recog);
   };
   const safeStop = () => {
     if (silenceTimerRef.current) {
@@ -684,9 +885,8 @@ Task:
         try { recognitionRef.current?.stop(); } catch {}
         try {
           if (recognitionRef.current) (recognitionRef.current as any).lang = "en-US";
-          recognitionRef.current?.start();
-          markListeningResumed();
         } catch {}
+        safeStartRecognition();
       }
     }, 5000) as unknown as number;
 
@@ -697,6 +897,47 @@ Task:
       }
     };
   }, [isActive]);
+
+  // 🚨 EMERGENCY WATCHDOG: Force unlock if stuck > 30s
+  useEffect(() => {
+    if (!isActive) return;
+
+    watchdogTimerRef.current = window.setInterval(() => {
+      const now = Date.now();
+
+      // Check if generation is stuck
+      if (isGeneratingRef.current && generationStartedAtRef.current > 0) {
+        const generationDuration = now - generationStartedAtRef.current;
+        if (generationDuration > 30000) {
+          console.error("🚨 [WATCHDOG] Generation stuck for 30s, force unlocking!");
+          isGeneratingRef.current = false;
+          generationStartedAtRef.current = 0;
+          // Do NOT clear pending - let it drain normally via finally block
+        }
+      }
+
+      // Check if speaking is stuck
+      if (isSpeakingRef.current && speakingStartedAtRef.current > 0) {
+        const speakingDuration = now - speakingStartedAtRef.current;
+        if (speakingDuration > 30000) {
+          console.error("🚨 [WATCHDOG] Speaking stuck for 30s, force unlocking!");
+          isSpeakingRef.current = false;
+          speakingStartedAtRef.current = 0;
+          // Restart recognition if still active
+          if (isActive && voiceOutputMode === "AGENT") {
+            safeStartRecognition();
+          }
+        }
+      }
+    }, 5000) as unknown as number;
+
+    return () => {
+      if (watchdogTimerRef.current) {
+        clearInterval(watchdogTimerRef.current as number);
+        watchdogTimerRef.current = null;
+      }
+    };
+  }, [isActive, voiceOutputMode]);
 
   // 开/停
   useEffect(() => {
@@ -926,22 +1167,31 @@ Task:
       };
       setConversation((prev) => [...prev, aiMsg]);
 
+      // Update Delivery Guardrail refs
+      lastSuggestionAtRef.current = Date.now();
+      lastSuggestionTextRef.current = reply;
+
       // 播报（仅 Agent 模式）
       if (voiceOutputMode === "AGENT") {
-        const recog = ensureRecognition();
-        isSpeakingRef.current = true;
-        try { recog?.stop(); } catch {}
-        const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
-        const speakMs = estimateTtsMs(safeReply);
-        const extra = speakerMode ? 700 : 300;
-        await speakWithElevenLabs(safeReply);
-        await new Promise((r) => setTimeout(r, speakMs + extra));
+        try {
+          const recog = ensureRecognition();
+          isSpeakingRef.current = true;
+          speakingStartedAtRef.current = Date.now();
+          try { recog?.stop(); } catch {}
+          const safeReply = sanitizeForTTS(reply, manualInputsRef.current);
+          const speakMs = estimateTtsMs(safeReply);
+          const extra = speakerMode ? 700 : 300;
+          await speakWithElevenLabs(safeReply);
+          await new Promise((r) => setTimeout(r, speakMs + extra));
+        } finally {
+          isSpeakingRef.current = false;
+          speakingStartedAtRef.current = 0;
+        }
       }
       // Live 模式：不播报
     } catch (e) {
       console.error(e);
     } finally {
-      isSpeakingRef.current = false;
       if (isActive && voiceOutputMode === "AGENT") safeStart();
     }
   };
@@ -1066,6 +1316,7 @@ Avoid questions. Stay consistent with the conversation. No new topics.
               disabled={isActive}
             >
               <option value="face-to-face">Face to Face 当面沟通</option>
+              <option value="interview-meeting">Interview/Meeting 面试/会议</option>
               <option value="call-out">Call Out (future)</option>
               <option value="call-in">Call In (future)</option>
               <option value="notes">Notes (Silent Transcript)</option>
@@ -1332,6 +1583,19 @@ Avoid questions. Stay consistent with the conversation. No new topics.
           </div>
         )}
       </div>
+
+      {/* Live Caption Display (Zoom-like interim results) */}
+      {liveCaption && (
+        <div className="border-2 border-blue-400 rounded p-3 bg-blue-50 mb-4">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-xs font-semibold text-blue-700 uppercase">🎤 Live Caption</span>
+            <span className="text-xs text-gray-500 italic">(speaking...)</span>
+          </div>
+          <div className="text-gray-800 leading-relaxed">
+            {liveCaption}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-medium">对话记录 Conversation</h3>
