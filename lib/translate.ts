@@ -15,8 +15,8 @@ export function hasChinese(text: string): boolean {
  */
 async function translateToZH(enText: string): Promise<string> {
   try {
-    const systemMessage = "You are a professional translator. Translate the given English text to natural, fluent Chinese. Only output the translation, no explanations.";
-    const userMessage = `Translate this to Chinese:\n${enText}`;
+    const systemMessage = "You help a Chinese speaker understand English conversation. Convert the text into concise, natural Chinese that preserves the meaning, intent, and nuance. Only output Chinese, no labels.";
+    const userMessage = `Explain this in Chinese:\n${enText}`;
 
     const result = await getAIResponse({ systemMessage, userMessage });
     return result.trim();

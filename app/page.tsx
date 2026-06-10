@@ -4,22 +4,27 @@ import LiveConversation from '@/app/components/LiveConversation';
 
 export default function Home() {
   return (
-    <main className="min-h-screen bg-white text-black p-6 space-y-4">
-      <h1 className="text-2xl font-bold text-blue-700">
-        AI秘书语音对话测试 / AI Secretary — Live Conversation
-      </h1>
+    <main className="min-h-screen bg-slate-50 text-slate-950 p-4 md:p-6">
+      <section className="mx-auto max-w-7xl space-y-4">
+        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold uppercase tracking-wide text-blue-700">
+            AI Communication Copilot
+          </p>
+          <h1 className="mt-2 text-2xl font-bold text-slate-950 md:text-3xl">
+            External brain for English conversations
+          </h1>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-700">
+            AI helps you understand and suggests what you can say. You stay in
+            control. AI does not speak automatically.
+          </p>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+            中文说明：实时听对方说话，显示字幕，帮你用中文理解意思，
+            并给出自然英文提词。默认不会自动替你说话。
+          </p>
+        </div>
 
-      <p className="text-gray-700 text-sm leading-6">
-        中文说明：点击「开始对话」，对方可以直接说话（中英文皆可），
-        AI 会自动帮你理解，对外用自然的英文替你回答。
-        <br />
-        <span className="text-gray-600">
-          EN: Click "Start". The other person can speak freely in English or Chinese.
-          The AI understands you in Chinese and replies in fluent English on your behalf.
-        </span>
-      </p>
-
-      <LiveConversation />
+        <LiveConversation />
+      </section>
     </main>
   );
 }
