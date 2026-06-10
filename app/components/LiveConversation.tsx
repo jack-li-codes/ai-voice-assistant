@@ -1491,7 +1491,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
 
   const transcriptMessages = conversation
     .filter((msg) => msg.role === "user" && !isTimestampLine(msg.contentEN))
-    .slice(-4);
+    .slice(-5);
 
   const latestPartnerMessage = [...conversation]
     .reverse()
@@ -1517,19 +1517,19 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
   const latestMeaning = latestPartnerMessage?.contentZH || "";
 
   return (
-    <div className="space-y-5 text-[15px] leading-7">
-      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div className="space-y-3 text-[15px] leading-6">
+      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="text-2xl font-semibold text-slate-950">
+            <h2 className="text-xl font-semibold text-slate-950">
               Communication Copilot / 沟通外脑
             </h2>
-            <p className="mt-1 text-base text-slate-600">
+            <p className="mt-0.5 text-sm text-slate-600">
               Listen, understand, and choose what to say.
             </p>
           </div>
           <button
-            className={`rounded px-6 py-3 text-base font-semibold text-white ${
+            className={`rounded px-5 py-2.5 text-base font-semibold text-white ${
               isActive ? "bg-red-600 hover:bg-red-700" : "bg-green-700 hover:bg-green-800"
             }`}
             onClick={() => setIsActive((v) => !v)}
@@ -1538,18 +1538,18 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
           </button>
         </div>
 
-        <details className="mt-5 rounded-lg border border-slate-200 bg-slate-50 p-4">
+        <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
           <summary className="cursor-pointer text-sm font-medium text-slate-700">
             Current scenario: {currentScenario.title}
           </summary>
-          <div className="mt-4 grid gap-3 md:grid-cols-4">
+          <div className="mt-3 grid gap-2 md:grid-cols-4">
             {scenarioCards.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => chooseScenario(item.id)}
                 disabled={isActive}
-                className={`rounded-lg border p-3 text-left transition ${
+                className={`rounded-lg border p-2.5 text-left transition ${
                   scenario === item.id
                     ? "border-blue-600 bg-blue-50 text-blue-950"
                     : "border-slate-200 bg-white text-slate-800 hover:border-slate-300"
@@ -1562,17 +1562,17 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
           </div>
         </details>
 
-        <div className="mt-5 rounded-lg border border-blue-100 bg-blue-50 p-4">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
-              <div className="text-base font-semibold text-slate-900">
+              <div className="text-sm font-semibold text-slate-900">
                 Listening target / 当前分析对象
               </div>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2 md:min-w-[420px]">
+            <div className="grid gap-2 sm:grid-cols-2 md:min-w-[520px]">
               <button
                 type="button"
-                className={`rounded border px-4 py-3 text-base font-semibold transition ${
+                className={`rounded border px-4 py-2 text-sm font-semibold transition ${
                   activeSpeaker === "partner"
                     ? "border-blue-700 bg-blue-700 text-white"
                     : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
@@ -1583,7 +1583,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
               </button>
               <button
                 type="button"
-                className={`rounded border px-4 py-3 text-base font-semibold transition ${
+                className={`rounded border px-4 py-2 text-sm font-semibold transition ${
                   activeSpeaker === "me"
                     ? "border-amber-600 bg-amber-500 text-white"
                     : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
@@ -1597,19 +1597,19 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
         </div>
       </section>
 
-      <details className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-        <summary className="cursor-pointer text-base font-semibold text-slate-800">
+      <details className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-800">
           Preparation / 背景准备
           <span className="ml-2 text-sm font-normal text-slate-500">
             {background || myGoal || speakerRole ? "Context added" : "Add context when needed"}
           </span>
         </summary>
 
-        <div className="mt-5 space-y-4">
+        <div className="mt-4 space-y-3">
               <label className="block">
                 <span className="text-sm font-medium text-slate-700">Background / Context</span>
                 <textarea
-                  className="mt-1 h-28 w-full rounded border border-slate-300 px-3 py-3 text-base leading-7"
+                  className="mt-1 h-24 w-full rounded border border-slate-300 px-3 py-2 text-base leading-6"
                   placeholder={currentScenario.guidePlaceholder}
                   value={background}
                   onChange={(e) => setBackground(e.target.value)}
@@ -1621,7 +1621,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
                 <label className="block">
                   <span className="text-sm font-medium text-slate-700">My goal / 我的目标</span>
                   <input
-                    className="mt-1 w-full rounded border border-slate-300 px-3 py-3 text-base"
+                    className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-base"
                     placeholder={currentScenario.goalPlaceholder}
                     value={myGoal}
                     onChange={(e) => setMyGoal(e.target.value)}
@@ -1632,7 +1632,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
                 <label className="block">
                   <span className="text-sm font-medium text-slate-700">My tone / 我的语气</span>
                   <input
-                    className="mt-1 w-full rounded border border-slate-300 px-3 py-3 text-base"
+                    className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-base"
                     value={myTone}
                     onChange={(e) => setMyTone(e.target.value)}
                     disabled={isActive}
@@ -1643,7 +1643,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
               <label className="block">
                 <span className="text-sm font-medium text-slate-700">Other person / 对方身份</span>
                 <input
-                  className="mt-1 w-full rounded border border-slate-300 px-3 py-3 text-base"
+                  className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-base"
                   placeholder={currentScenario.rolePlaceholder}
                   value={speakerRole}
                   onChange={(e) => setSpeakerRole(e.target.value)}
@@ -1651,7 +1651,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
                 />
               </label>
 
-              <details className="rounded border border-slate-200 bg-slate-50 p-4">
+              <details className="rounded border border-slate-200 bg-slate-50 p-3">
                 <summary className="cursor-pointer text-sm font-medium text-slate-700">
                   Import guide and settings / 导入背景与设置
                 </summary>
@@ -1784,22 +1784,22 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
         </div>
       </details>
 
-      <section className="space-y-5">
-        <article className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <h3 className="text-xl font-semibold text-slate-950">
+      <section className="space-y-3">
+        <article className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h3 className="text-lg font-semibold text-slate-950">
             Chinese Meaning / 中文理解
           </h3>
           <p className="mt-1 text-xs leading-5 text-slate-500">
             Only updates when target is Other person / 只在分析对象为对方时更新
           </p>
-          <div className="mt-4 min-h-44 rounded-lg border border-amber-200 bg-amber-50 p-5">
+          <div className="mt-3 min-h-24 rounded-lg border border-amber-200 bg-amber-50 p-4">
             {latestOriginal || latestMeaning ? (
-              <div className="space-y-5">
+              <div className="space-y-4">
                 <div>
                   <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                     Original / 原文
                   </div>
-                  <div className="mt-2 whitespace-pre-wrap text-lg leading-8 text-slate-950">
+                  <div className="mt-1 whitespace-pre-wrap text-lg leading-7 text-slate-950">
                     {latestOriginal}
                   </div>
                 </div>
@@ -1807,26 +1807,26 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
                   <div className="text-xs font-semibold uppercase tracking-wide text-amber-700">
                     Chinese meaning / 中文理解
                   </div>
-                  <div className="mt-2 whitespace-pre-wrap text-lg leading-8 text-slate-900">
+                  <div className="mt-1 whitespace-pre-wrap text-lg leading-7 text-slate-900">
                     {latestMeaning}
                   </div>
                 </div>
               </div>
             ) : (
-              <div className="text-base leading-7 text-slate-600">
+              <div className="text-sm leading-6 text-slate-600">
                 对方说完一句后，这里会先显示英文原文，再显示中文理解。
               </div>
             )}
           </div>
         </article>
 
-        <article className="rounded-lg border-2 border-blue-200 bg-white p-5 shadow-sm">
+        <article className="rounded-lg border-2 border-blue-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div>
-              <h3 className="text-2xl font-semibold text-blue-950">
+              <h3 className="text-xl font-semibold text-blue-950">
                 Suggested English / 我可以说
               </h3>
-              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
+              <p className="mt-1 max-w-2xl text-sm leading-5 text-slate-500">
                 Paused while target is Me. Previous suggestion stays visible.
                 当分析对象是我时暂停更新，上一条建议会保留。
               </p>
@@ -1834,7 +1834,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
             <div className="flex flex-wrap gap-2">
               {suggestedOptions.length > 1 && (
                 <button
-                  className="rounded border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
                   onClick={copyAllLines}
                 >
                   Copy all
@@ -1842,14 +1842,14 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
               )}
               {pendingLines.length > 0 && (
                 <button
-                  className="rounded border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
                   onClick={clearPendingLines}
                 >
                   Clear
                 </button>
               )}
               <button
-                className="rounded bg-blue-700 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded bg-blue-700 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={generateSuggestedLine}
                 disabled={isGeneratingLine}
               >
@@ -1858,22 +1858,22 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
             </div>
           </div>
 
-          <div className="mt-5 min-h-60 space-y-3">
+          <div className="mt-4 space-y-3">
             {suggestedOptions.length ? (
               suggestedOptions.map((line, idx) => (
-                <div key={`${line}-${idx}`} className="rounded-lg border border-blue-100 bg-blue-50 p-5">
-                  <div className="whitespace-pre-wrap text-2xl leading-10 text-slate-950">
+                <div key={`${line}-${idx}`} className="rounded-lg border border-blue-100 bg-blue-50 p-4">
+                  <div className="whitespace-pre-wrap text-2xl leading-9 text-slate-950">
                     {line}
                   </div>
-                  <div className="mt-4 flex flex-wrap gap-2">
+                  <div className="mt-3 flex flex-wrap gap-2">
                     <button
-                      className="rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                      className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
                       onClick={() => copySingleLine(line)}
                     >
                       Copy
                     </button>
                     <button
-                      className="rounded border border-blue-300 bg-white px-4 py-2 text-sm font-medium text-blue-800 hover:bg-blue-100"
+                      className="rounded border border-blue-300 bg-white px-3 py-1.5 text-sm font-medium text-blue-800 hover:bg-blue-100"
                       onClick={() => speakSuggestedLine(line)}
                     >
                       Speak this line
@@ -1882,7 +1882,7 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
                 </div>
               ))
             ) : (
-              <div className="rounded-lg border border-dashed border-blue-200 bg-blue-50 p-6 text-base leading-7 text-slate-600">
+              <div className="rounded-lg border border-dashed border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-slate-600">
                 Suggestions will appear here after the other person speaks.
               </div>
             )}
@@ -1891,10 +1891,10 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
           <ManualInputBox onSend={handleManualSend} />
         </article>
 
-        <article className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <article className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
           <div className="flex items-center justify-between gap-3">
-            <h3 className="text-xl font-semibold text-slate-950">
-              Recent Transcript / 最近记录
+            <h3 className="text-lg font-semibold text-slate-950">
+              Recent context / 最近上下文
             </h3>
             <span className={`rounded-full px-3 py-1 text-xs font-medium ${
               isActive ? "bg-green-100 text-green-800" : "bg-slate-100 text-slate-600"
@@ -1902,14 +1902,14 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
               {isActive ? "Listening" : "Paused"}
             </span>
           </div>
-          <p className="mt-2 text-sm leading-6 text-slate-500">
+          <p className="mt-1 text-sm leading-5 text-slate-500">
             {activeSpeaker === "partner"
               ? "Recording the other person. Suggestions will update."
               : "Recording you as Me. Chinese Meaning and Suggested English are paused."}
           </p>
 
           {liveCaption && (
-            <div className="mt-3 rounded border border-blue-200 bg-blue-50 p-3">
+            <div className="mt-2 rounded border border-blue-200 bg-blue-50 p-2.5">
               <div className="text-xs font-semibold uppercase text-blue-700">
                 Hearing now
               </div>
@@ -1917,21 +1917,24 @@ Avoid questions unless needed. Stay consistent with the conversation. No new top
             </div>
           )}
 
-          <div className="mt-3 min-h-32 space-y-3">
+          <div className="mt-2 space-y-2">
             {transcriptMessages.length ? (
               transcriptMessages.map((msg) => (
-                <div key={msg.id} className="rounded border border-slate-200 bg-slate-50 p-3">
-                  <div className="text-xs font-semibold uppercase text-slate-500">
+                <div key={msg.id} className="rounded border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                     {msg.speaker === "me" || msg.isManual ? "Me" : "Other person"}
                   </div>
-                  <div className="mt-1 whitespace-pre-wrap text-base leading-7 text-slate-800">
+                  <div className="mt-0.5 whitespace-pre-wrap text-sm leading-5 text-slate-900">
                     {msg.contentEN}
+                  </div>
+                  <div className="mt-0.5 whitespace-pre-wrap text-xs leading-5 text-slate-600">
+                    {msg.contentZH}
                   </div>
                 </div>
               ))
             ) : (
-              <div className="rounded border border-dashed border-slate-300 p-4 text-sm text-slate-500">
-                Start listening to see recent speech here.
+              <div className="rounded border border-dashed border-slate-300 px-3 py-2 text-sm text-slate-500">
+                Recent bilingual context will appear here.
               </div>
             )}
           </div>
