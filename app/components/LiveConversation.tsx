@@ -32,8 +32,6 @@ declare global {
 /* ===================== Utils ===================== */
 const hasCJK = (s: string) => /[\u3400-\u9FFF\uF900-\uFAFF]/.test(s);
 const pickASRLang = (hint: string) => (hasCJK(hint) ? "zh-CN" : "en-US");
-const isGreeting = (t: string) =>
-  /^(hi|hello|hey|how are you|哈(啰|罗)|你好)\b/i.test(t);
 
 /** 判断文本是否有效（不是空文本或只有标点） */
 const isMeaningfulText = (t: string) => {
@@ -123,6 +121,50 @@ const jaccard = (setA: Set<string>, setB: Set<string>) => {
   return union ? inter / union : 0;
 };
 
+const endsLikeCompleteThought = (text: string) =>
+  /[.!?。！？]$/.test((text || "").trim());
+
+const startsLikeContinuation = (text: string) =>
+  /^(and|but|or|so|then|because|also|plus|uh|um|yeah|yes|no|i|we|you|they|he|she|it|to|for|at|in|on|with|that|which|who|what|when|where|why|how)\b/i
+    .test((text || "").trim());
+
+const shouldMergeTranscriptMessage = (previous: ChatMessage, next: ChatMessage) => {
+  if (previous.role !== "user" || next.role !== "user") return false;
+  if (previous.speaker !== next.speaker) return false;
+  if (previous.isManual || next.isManual) return false;
+  if (isTimestampLine(previous.contentEN) || isTimestampLine(next.contentEN)) return false;
+  if (!isMeaningfulText(next.contentEN)) return false;
+
+  const previousTime = previous.timestamp || 0;
+  const nextTime = next.timestamp || Date.now();
+  if (!previousTime) return false;
+
+  const maxGap = next.speaker === "me" ? 8000 : 5000;
+  if (nextTime - previousTime > maxGap) return false;
+
+  const nextWords = next.contentEN.trim().split(/\s+/).filter(Boolean).length;
+  const previousLooksOpen = !endsLikeCompleteThought(previous.contentEN);
+  const nextLooksFragment = nextWords <= 4 || startsLikeContinuation(next.contentEN);
+
+  return previousLooksOpen || nextLooksFragment;
+};
+
+const appendTranscriptMessage = (messages: ChatMessage[], next: ChatMessage) => {
+  const previous = messages[messages.length - 1];
+  if (!previous || !shouldMergeTranscriptMessage(previous, next)) {
+    return [...messages, next];
+  }
+
+  const merged: ChatMessage = {
+    ...previous,
+    contentEN: `${previous.contentEN.trim()} ${next.contentEN.trim()}`.trim(),
+    contentZH: `${previous.contentZH.trim()} ${next.contentZH.trim()}`.trim(),
+    timestamp: next.timestamp || previous.timestamp,
+  };
+
+  return [...messages.slice(0, -1), merged];
+};
+
 
 function isEchoOfAI(partnerText: string, recentAI: string[], threshold = 0.55) {
   const a = tokenSet(partnerText);
@@ -177,10 +219,62 @@ function detectMisname(text: string, myName: string) {
 // 时间戳间隔常量（5分钟）
 const FIVE_MIN_MS = 5 * 60 * 1000;
 
+type ScenarioId = "zoom-1-1" | "phone-call" | "team-meeting" | "face-to-face";
+
+const scenarioCards: Array<{
+  id: ScenarioId;
+  title: string;
+  subtitle: string;
+  mode: string;
+  rolePlaceholder: string;
+  guidePlaceholder: string;
+  goalPlaceholder: string;
+}> = [
+  {
+    id: "zoom-1-1",
+    title: "Zoom 1:1",
+    subtitle: "Interview, manager sync, client call",
+    mode: "interview-meeting",
+    rolePlaceholder: "e.g. hiring manager, client, mentor",
+    guidePlaceholder: "Who are you meeting? What do they care about? Add any important background or constraints.",
+    goalPlaceholder: "e.g. Explain my project clearly and ask for next steps.",
+  },
+  {
+    id: "phone-call",
+    title: "Phone Call",
+    subtitle: "Fast help while listening on a call",
+    mode: "face-to-face",
+    rolePlaceholder: "e.g. clinic receptionist, bank agent, school office",
+    guidePlaceholder: "Add account details, appointment context, problem summary, or anything the caller may ask about.",
+    goalPlaceholder: "e.g. Understand the issue and confirm the action I need to take.",
+  },
+  {
+    id: "team-meeting",
+    title: "Team Meeting",
+    subtitle: "Follow discussion and prepare concise replies",
+    mode: "interview-meeting",
+    rolePlaceholder: "e.g. product team, engineer, project lead",
+    guidePlaceholder: "Add project context, decisions needed, your responsibilities, and any topics likely to come up.",
+    goalPlaceholder: "e.g. Contribute one clear update and clarify blockers.",
+  },
+  {
+    id: "face-to-face",
+    title: "Face to Face",
+    subtitle: "In-person conversation support",
+    mode: "face-to-face",
+    rolePlaceholder: "e.g. doctor, teacher, neighbor, service staff",
+    guidePlaceholder: "Add the situation, names, symptoms, questions, preferences, or boundaries you want remembered.",
+    goalPlaceholder: "e.g. Stay calm, understand them, and answer politely.",
+  },
+];
+
 export default function LiveConversation() {
   // —— 表单 —— //
-  const [mode, setMode] = useState("face-to-face");
+  const [scenario, setScenario] = useState<ScenarioId>("zoom-1-1");
+  const [mode, setMode] = useState("interview-meeting");
   const [background, setBackground] = useState("");
+  const [myGoal, setMyGoal] = useState("");
+  const [myTone, setMyTone] = useState("Natural, calm, and professional");
   const [speakerRole, setSpeakerRole] = useState("");
 
   // Voice Output Mode: "LIVE" = 你说 (TTS OFF), "AGENT" = AI说 (TTS ON)
@@ -188,9 +282,7 @@ export default function LiveConversation() {
 
   // Active Speaker (Face-to-Face mode only): who is speaking now
   const [activeSpeaker, setActiveSpeaker] = useState<"partner" | "me">("partner");
-
-  // UI 折叠控制
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const activeSpeakerRef = useRef<"partner" | "me">("partner");
 
   // 动态身份
   const [myName, setMyName] = useState("Lucy"); // 默认值，随时可改
@@ -212,7 +304,7 @@ export default function LiveConversation() {
   const [isGeneratingLine, setIsGeneratingLine] = useState(false);
 
   // Auto suggestions control (LIVE mode only)
-  const [autoSuggestEnabled, setAutoSuggestEnabled] = useState(false);
+  const [autoSuggestEnabled, setAutoSuggestEnabled] = useState(true);
 
   // Notes 模式：自动时间戳
   const lastTimestampRef = useRef<number>(0);
@@ -265,7 +357,7 @@ export default function LiveConversation() {
 
   // Backpressure refs (防堵死)
   const isGeneratingRef = useRef(false);
-  const pendingPartnerTextRef = useRef<string | null>(null);
+  const pendingPartnerInputRef = useRef<{ text: string; target: "partner" | "me" } | null>(null);
 
   // Watchdog: track when locks were set (for emergency unlock)
   const generationStartedAtRef = useRef<number>(0);
@@ -274,6 +366,20 @@ export default function LiveConversation() {
 
   // SpeechRecognition restart debounce (防抖)
   const restartingRef = useRef(false);
+
+  const currentScenario =
+    scenarioCards.find((item) => item.id === scenario) || scenarioCards[0];
+
+  const chooseScenario = (nextScenario: ScenarioId) => {
+    const next = scenarioCards.find((item) => item.id === nextScenario);
+    if (!next) return;
+    setScenario(nextScenario);
+    setMode(next.mode);
+  };
+
+  useEffect(() => {
+    activeSpeakerRef.current = activeSpeaker;
+  }, [activeSpeaker]);
 
   // 根据 GUIDE 自动更新名字（可关闭）
   useEffect(() => {
@@ -329,7 +435,11 @@ export default function LiveConversation() {
   };
 
   /* 统一提交入口：防止空提交产生 "noted" */
-  const finalizeAndSubmit = async (text: string, reason: string) => {
+  const finalizeAndSubmit = async (
+    text: string,
+    reason: string,
+    targetAtRecognition: "partner" | "me" = activeSpeakerRef.current
+  ) => {
     if (!isMeaningfulText(text)) {
       // 无效文本：不要发 GPT，不要生成 "noted"
       console.log("[ASR] skip submit (empty/short)", { reason, text });
@@ -342,11 +452,13 @@ export default function LiveConversation() {
       silenceTimerRef.current = null;
     }
 
+    const listeningTarget = targetAtRecognition;
+
     // A) Delivery Guardrail (防反哺)
     const isFaceToFace = mode === "face-to-face";
     if (
       isFaceToFace &&
-      activeSpeaker === "partner" &&
+      listeningTarget === "partner" &&
       autoSuggestEnabled &&
       lastSuggestionTextRef.current
     ) {
@@ -362,9 +474,9 @@ export default function LiveConversation() {
       }
     }
 
-    // Face-to-Face 模式：如果当前说话的是"我"，只记录不触发 AI
-    if (isFaceToFace && activeSpeaker === "me") {
-      console.log("[Face-to-Face] Speaker is 'me', record only (no AI response)", { reason, text });
+    // 如果当前分析对象是"我"，只记录不触发 AI。适用于所有外部监听场景。
+    if (listeningTarget === "me") {
+      console.log("[Listening target] Me / pause suggestions, record only", { reason, text });
 
       // 可选：记录"我"说的话（根据需求，这里暂时记录）
       const myBilingual = await toBilingual(text);
@@ -376,7 +488,7 @@ export default function LiveConversation() {
         timestamp: Date.now(),
         speaker: "me",
       };
-      setConversation((prev) => [...prev, myMsg]);
+      setConversation((prev) => appendTranscriptMessage(prev, myMsg));
       return; // 不触发 AI 提词
     }
 
@@ -402,8 +514,9 @@ export default function LiveConversation() {
         contentEN: partnerBilingual.en,
         contentZH: partnerBilingual.zh,
         timestamp: Date.now(),
+        speaker: "partner",
       };
-      setConversation((prev) => [...prev, partnerMsg]);
+      setConversation((prev) => appendTranscriptMessage(prev, partnerMsg));
       console.log("[Notes] transcript saved:", text);
       return; // 不调用 AI
     }
@@ -416,9 +529,9 @@ export default function LiveConversation() {
     }
 
     // Create bilingual message for partner's speech
-    // 优化：Face-to-Face LIVE 模式下跳过 toBilingual 以减少延迟
+    // Phase 1 copilot UX: keep Chinese meaning visible even in LIVE mode.
     const isLiveMode = voiceOutputMode === "LIVE";
-    const shouldSkipTranslation = isFaceToFace && isLiveMode;
+    const shouldSkipTranslation = false;
 
     let partnerMsg: ChatMessage;
     if (shouldSkipTranslation) {
@@ -442,7 +555,7 @@ export default function LiveConversation() {
         speaker: "partner",
       };
     }
-    setConversation((prev) => [...prev, partnerMsg]);
+    setConversation((prev) => appendTranscriptMessage(prev, partnerMsg));
 
     // —— LIVE 模式下，如果 Auto suggestions 关闭，则只保存转写，不生成 AI 回复 —— //
     if (isLiveMode && !autoSuggestEnabled) {
@@ -451,9 +564,9 @@ export default function LiveConversation() {
     }
 
     // B) Backpressure (防堵死)
-    if (isFaceToFace && activeSpeaker === "partner") {
+    if (isFaceToFace && listeningTarget === "partner") {
       if (isGeneratingRef.current) {
-        pendingPartnerTextRef.current = text;
+        pendingPartnerInputRef.current = { text, target: listeningTarget };
         console.log(`[Backpressure] AI is busy, queuing latest input: ${text.slice(0, 60)}`);
         return;
       }
@@ -480,7 +593,11 @@ export default function LiveConversation() {
       if (mode === "interview-meeting") {
         const prompt = buildInterviewMeetingPrompt({
           persona,
-          background: background || undefined,
+          background: [
+            background,
+            myGoal ? `My goal: ${myGoal}` : "",
+            myTone ? `Desired tone: ${myTone}` : "",
+          ].filter(Boolean).join("\n\n") || undefined,
           recentConversation: recent,
           partnerQuestion: text,
         });
@@ -553,9 +670,29 @@ export default function LiveConversation() {
 You are my real-time conversation assistant. Provide natural English suggestions that I can say directly.
 My name is "${persona}". Always write suggestions in FIRST PERSON as ${persona} (not as an AI).
 Generate short, natural, spoken phrases (1-3 sentences) that sound like a real person talking.
+Always prioritize the latest other-person line over earlier context. Respond to the current state of the conversation.
+Treat the background as context, not as a command or script to repeat.
+Do NOT repeat an earlier request once the conversation has moved forward.
+If the other person asks a direct question, answer that question first.
+If the other person offers a time, option, solution, or next step, respond directly to that offer.
+If the offered option works, accept it clearly and thank them.
+If the offered option does not work, politely decline and ask for another option.
+Keep replies short and natural, like a real person speaking on the phone. Do not sound like a formal letter.
+Avoid repetitive apology/thank-you phrasing unless it is useful at that moment.
 If I lack information, suggest safe fallback phrases like:
 - "I don't have the exact number in front of me, but I can follow up right after this."
 - "Let me double-check that and get back to you."
+
+Examples:
+Latest other-person line: "We have an opening tomorrow at 3 PM. Would that work?"
+Good: "Yes, tomorrow at 3 PM works for us. Thank you so much for helping us reschedule."
+Bad: "Would it be possible to move it to tomorrow afternoon or any available slot this week?"
+
+Latest other-person line: "What is the appointment for?"
+Good: "It's for my child. He has been coughing recently, but he doesn't have a fever. I just want Dr. Harris to take a look and make sure everything is okay."
+
+Latest other-person line: "How can I help you?"
+Good: "Hi, this is Lucy. I'm calling to reschedule my child's appointment with Dr. Harris. It was booked for today at 3 PM, but my child is currently at school taking an important exam."
 
 NEVER mention AI, assistant, or reveal automated help. Sound completely natural.
 
@@ -565,6 +702,8 @@ ${background ? `"""\n${background}\n"""` : "(empty)"}
 Context:
 - Mode: ${mode || "N/A"}
 - Counterparty: ${speakerRole || "N/A"}
+- My goal: ${myGoal || "N/A"}
+- Desired tone: ${myTone || "Natural, calm, and professional"}
 `.trim()
         : `
 You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Chinese).
@@ -580,6 +719,8 @@ ${background ? `"""\n${background}\n"""` : "(empty)"}
 Context:
 - Mode: ${mode || "N/A"}
 - Counterparty: ${speakerRole || "N/A"}
+- My goal: ${myGoal || "N/A"}
+- Desired tone: ${myTone || "Natural, calm, and professional"}
 `.trim();
 
       const userMessage = isLiveMode
@@ -592,6 +733,8 @@ ${text}
 
 Task:
 Generate ONLY what I should say next in ENGLISH (1-3 natural sentences, first-person as ${persona}).
+The latest other-person line is the anchor. Answer it directly before using older context.
+Use the background only as context. Do not repeat old requests after the other person has offered a specific option.
 Do not explain or add commentary. Just provide the suggested reply I can read aloud.
 `.trim()
         : `
@@ -676,12 +819,12 @@ Task:
       // Backpressure: process pending input
       isGeneratingRef.current = false;
       generationStartedAtRef.current = 0;
-      const pending = pendingPartnerTextRef.current;
+      const pending = pendingPartnerInputRef.current;
       if (pending) {
-        pendingPartnerTextRef.current = null;
-        console.log(`[Backpressure] processing pending input: ${pending.slice(0, 60)}`);
+        pendingPartnerInputRef.current = null;
+        console.log(`[Backpressure] processing pending input: ${pending.text.slice(0, 60)}`);
         // 异步调用,避免阻塞
-        setTimeout(() => finalizeAndSubmit(pending, "backpressure-pending"), 0);
+        setTimeout(() => finalizeAndSubmit(pending.text, "backpressure-pending", pending.target), 0);
       }
 
       if (mustCorrectOnce) correctedOnceRef.current = true;
@@ -803,8 +946,8 @@ Task:
       if (almostSame) return;
       lastFinalTextRef.current = finalText;
 
-      // 调用统一提交入口
-      await finalizeAndSubmit(finalText, "onresult-final");
+      // 调用统一提交入口，并固定这次识别发生时的分析对象
+      await finalizeAndSubmit(finalText, "onresult-final", activeSpeakerRef.current);
     };
 
     recog.onerror = (e: any) => {
@@ -1112,6 +1255,8 @@ Task:
 You are my real-time conversation assistant. Provide natural English suggestions that I can say directly.
 My name is "${persona}". Always write suggestions in FIRST PERSON as ${persona} (not as an AI).
 Generate short, natural, spoken phrases (1-3 sentences) based on my notes.
+My goal: ${myGoal || "N/A"}.
+Desired tone: ${myTone || "Natural, calm, and professional"}.
 NEVER mention AI, assistant, or reveal automated help. Sound completely natural.
 `.trim()
       : `
@@ -1119,6 +1264,8 @@ You are my real-time voice proxy. Always reply in ENGLISH (even if inputs are Ch
 Your persona name is "${persona}". Never claim to be anyone else.
 Be natural, concise, professional (1–3 sentences). Progress the talk with one crisp point.
 Do not echo my manual note verbatim; paraphrase.
+My goal: ${myGoal || "N/A"}.
+Desired tone: ${myTone || "Natural, calm, and professional"}.
 `.trim();
 
     const userMessage = isLiveMode
@@ -1216,11 +1363,35 @@ Output exactly 2 to 4 options for what ${persona} can say next.
 Each option must be:
 - Short and speakable (6-18 words)
 - Professional English
+- Directly responsive to the latest other-person line
 - Consistent with recent conversation and GUIDE
 - Prefixed with "- " (dash + space)
 - Avoid questions unless context strongly requires them
 - Do NOT introduce new topics
 - Do NOT add explanations or commentary
+- Do NOT repeat an earlier request if the other person has already offered a specific time, option, solution, or next step
+- Treat the GUIDE/background as context, not as a script to repeat
+- Sound like a real person speaking on the phone, not a formal letter
+
+Use the latest other-person line as the anchor for every option.
+If the latest other-person line asks a direct question, answer it directly first.
+If the latest other-person line offers something that works, accept it clearly and thank them.
+If it does not work, politely ask for another option.
+
+Examples:
+Latest other-person line: "We have an opening tomorrow at 3 PM. Would that work?"
+Good:
+- Yes, tomorrow at 3 PM works for us. Thank you so much.
+Bad:
+- Could we move it to tomorrow afternoon or later this week?
+
+Latest other-person line: "What is the appointment for?"
+Good:
+- It's for my child. He has been coughing, but he doesn't have a fever.
+
+Latest other-person line: "How can I help you?"
+Good:
+- Hi, this is Lucy. I'm calling to reschedule my child's appointment.
 
 Format:
 - [First option]
@@ -1233,13 +1404,20 @@ Format:
 Background context (GUIDE):
 ${background ? `"""\n${background}\n"""` : "(none)"}
 
+My goal:
+${myGoal || "(not specified)"}
+
+Desired tone:
+${myTone || "Natural, calm, and professional"}
+
 Recent conversation:
 ${recent}
 
 Task:
 Generate 2 to 4 short professional English response options (6-18 words each) that ${persona} can say next.
 Each option on its own line with "- " prefix.
-Avoid questions. Stay consistent with the conversation. No new topics.
+Use the latest other-person line as the anchor. Do not generate options that repeat old requests after the other person has offered a specific option.
+Avoid questions unless needed. Stay consistent with the conversation. No new topics.
 `.trim();
 
       const reply = await getAIResponse({ systemMessage, userMessage });
@@ -1292,443 +1470,551 @@ Avoid questions. Stay consistent with the conversation. No new topics.
     setPendingLines([]);
   };
 
+  const speakSuggestedLine = async (line: string) => {
+    if (!line.trim()) return;
+
+    try {
+      const recog = recognitionRef.current;
+      isSpeakingRef.current = true;
+      speakingStartedAtRef.current = Date.now();
+      try { recog?.stop(); } catch {}
+      await speakWithElevenLabs(line);
+      await new Promise((r) => setTimeout(r, estimateTtsMs(line) + 500));
+    } catch (error) {
+      console.error("Manual suggestion TTS failed:", error);
+    } finally {
+      isSpeakingRef.current = false;
+      speakingStartedAtRef.current = 0;
+      if (isActive) safeStart();
+    }
+  };
+
+  const transcriptMessages = conversation
+    .filter((msg) => msg.role === "user" && !isTimestampLine(msg.contentEN))
+    .slice(-5);
+
+  const latestPartnerMessage = [...conversation]
+    .reverse()
+    .find((msg) =>
+      msg.role === "user" &&
+      !msg.isManual &&
+      msg.speaker !== "me" &&
+      !isTimestampLine(msg.contentEN)
+    );
+
+  const latestSuggestionMessage = [...conversation]
+    .reverse()
+    .find((msg) => msg.role === "assistant");
+
+  const suggestedOptions =
+    pendingLines.length > 0
+      ? pendingLines
+      : latestSuggestionMessage?.contentEN
+      ? [latestSuggestionMessage.contentEN]
+      : [];
+
+  const latestOriginal = latestPartnerMessage?.contentEN || "";
+  const latestMeaning = latestPartnerMessage?.contentZH || "";
+
   return (
-    <div className="p-4 space-y-4">
-      <h2 className="text-xl font-semibold">AI Secretary — Live Conversation</h2>
-
-      {/* 核心设置 */}
-      <div className="border rounded p-3 bg-gray-50">
-        <MicSelector
-          className="mb-3"
-          onSelected={(id) => {
-            console.log("Preferred mic deviceId:", id);
-          }}
-        />
-
-        {/* 主控制行 */}
-        <div className="grid gap-3 md:grid-cols-2 mb-3">
+    <div className="space-y-3 text-[15px] leading-6">
+      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <label className="block text-sm mb-1 font-medium">Mode 场景</label>
-            <select
-              className="w-full border rounded px-2 py-1"
-              value={mode}
-              onChange={(e) => setMode(e.target.value)}
-              disabled={isActive}
-            >
-              <option value="face-to-face">Face to Face 当面沟通</option>
-              <option value="interview-meeting">Interview/Meeting 面试/会议</option>
-              <option value="call-out">Call Out (future)</option>
-              <option value="call-in">Call In (future)</option>
-              <option value="notes">Notes (Silent Transcript)</option>
-            </select>
+            <h2 className="text-xl font-semibold text-slate-950">
+              Communication Copilot / 沟通外脑
+            </h2>
+            <p className="mt-0.5 text-sm text-slate-600">
+              Listen, understand, and choose what to say.
+            </p>
           </div>
-
-          <div>
-            <label className="block text-sm mb-1 font-medium">Voice Output 语音输出</label>
-            <div className="flex items-center h-8">
-              {mode === "notes" ? (
-                <span className="text-sm text-gray-600 italic">
-                  Notes mode: text only 📝
-                </span>
-              ) : (
-                <label className="inline-flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={voiceOutputMode === "AGENT"}
-                    onChange={(e) => setVoiceOutputMode(e.target.checked ? "AGENT" : "LIVE")}
-                    disabled={isActive}
-                    className="w-4 h-4"
-                  />
-                  <span className="text-sm">
-                    {voiceOutputMode === "AGENT" ? "ON (AI speaks)" : "OFF (you speak)"}
-                  </span>
-                </label>
-              )}
-            </div>
-          </div>
+          <button
+            className={`rounded px-5 py-2.5 text-base font-semibold text-white ${
+              isActive ? "bg-red-600 hover:bg-red-700" : "bg-green-700 hover:bg-green-800"
+            }`}
+            onClick={() => setIsActive((v) => !v)}
+          >
+            {isActive ? "Stop listening / 停止" : "Start listening / 开始"}
+          </button>
         </div>
 
-        {/* Speaking now 切换控件 - 仅在 Face-to-Face 模式显示 */}
-        {mode === "face-to-face" && (
-          <div className="mb-3">
-            <label className="block text-sm mb-1 font-medium">
-              Speaking now 当前说话方
-            </label>
-            <div className="flex gap-2">
+        <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+          <summary className="cursor-pointer text-sm font-medium text-slate-700">
+            Current scenario: {currentScenario.title}
+          </summary>
+          <div className="mt-3 grid gap-2 md:grid-cols-4">
+            {scenarioCards.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => chooseScenario(item.id)}
+                disabled={isActive}
+                className={`rounded-lg border p-2.5 text-left transition ${
+                  scenario === item.id
+                    ? "border-blue-600 bg-blue-50 text-blue-950"
+                    : "border-slate-200 bg-white text-slate-800 hover:border-slate-300"
+                } ${isActive ? "cursor-not-allowed opacity-70" : ""}`}
+              >
+                <div className="text-sm font-semibold">{item.title}</div>
+                <div className="mt-1 text-xs leading-5 text-slate-600">{item.subtitle}</div>
+              </button>
+            ))}
+          </div>
+        </details>
+
+        <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">
+                Listening target / 当前分析对象
+              </div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 md:min-w-[520px]">
               <button
                 type="button"
-                className={`flex-1 px-3 py-1.5 text-sm rounded border ${
+                className={`rounded border px-4 py-2 text-sm font-semibold transition ${
                   activeSpeaker === "partner"
-                    ? "bg-blue-500 text-white border-blue-600"
-                    : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                    ? "border-blue-700 bg-blue-700 text-white"
+                    : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
                 }`}
                 onClick={() => setActiveSpeaker("partner")}
-                disabled={isActive}
               >
                 Other person 对方
               </button>
               <button
                 type="button"
-                className={`flex-1 px-3 py-1.5 text-sm rounded border ${
+                className={`rounded border px-4 py-2 text-sm font-semibold transition ${
                   activeSpeaker === "me"
-                    ? "bg-blue-500 text-white border-blue-600"
-                    : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                    ? "border-amber-600 bg-amber-500 text-white"
+                    : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
                 }`}
                 onClick={() => setActiveSpeaker("me")}
-                disabled={isActive}
               >
-                Me 我
+                Me / Pause suggestions 我在说/暂停建议
               </button>
             </div>
           </div>
-        )}
-
-        {/* Start/Stop 按钮 */}
-        <div className="mb-3">
-          <button
-            className={`w-full px-3 py-2 rounded text-white font-medium ${isActive ? "bg-red-500 hover:bg-red-600" : "bg-green-600 hover:bg-green-700"}`}
-            onClick={() => setIsActive((v) => !v)}
-          >
-            {isActive ? "停止 Stop" : "开始 Start"}
-          </button>
         </div>
+      </section>
 
-        {/* Auto suggestions 开关 - 仅在 LIVE 模式且非 Notes 模式时显示 */}
-        {mode !== "notes" && voiceOutputMode === "LIVE" && (
-          <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
-            <label className="inline-flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoSuggestEnabled}
-                onChange={(e) => setAutoSuggestEnabled(e.target.checked)}
-                disabled={isActive}
-                className="w-4 h-4"
-              />
-              <span className="text-sm font-medium">
-                Auto suggestions (hands-free)
-              </span>
-            </label>
-            <p className="text-xs text-gray-500 mt-1 ml-6">
-              When off, suggestions are generated only by the purple button.
-            </p>
-          </div>
-        )}
+      <details className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-800">
+          Preparation / 背景准备
+          <span className="ml-2 text-sm font-normal text-slate-500">
+            {background || myGoal || speakerRole ? "Context added" : "Add context when needed"}
+          </span>
+        </summary>
 
-        {/* Advanced 折叠区 */}
-        <details className="mt-2">
-          <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-800 font-medium">
-            Advanced Settings 高级设置 ▼
-          </summary>
-          <div className="mt-3 grid gap-3 md:grid-cols-2 border-t pt-3">
-            <div>
-              <label className="block text-sm mb-1">My Name 我的身份</label>
-              <input
-                className="w-full border rounded px-2 py-1 text-sm"
-                placeholder="e.g. James' father"
-                value={myName}
-                onChange={(e) => setMyName(e.target.value)}
-                disabled={isActive || autoNameFromGuide}
-              />
-              <label className="inline-flex items-center gap-2 mt-1 text-xs">
-                <input
-                  type="checkbox"
-                  checked={autoNameFromGuide}
-                  onChange={(e) => setAutoNameFromGuide(e.target.checked)}
+        <div className="mt-4 space-y-3">
+              <label className="block">
+                <span className="text-sm font-medium text-slate-700">Background / Context</span>
+                <textarea
+                  className="mt-1 h-24 w-full rounded border border-slate-300 px-3 py-2 text-base leading-6"
+                  placeholder={currentScenario.guidePlaceholder}
+                  value={background}
+                  onChange={(e) => setBackground(e.target.value)}
                   disabled={isActive}
                 />
-                Auto from GUIDE
               </label>
-            </div>
 
-            <div>
-              <label className="block text-sm mb-1">Counterparty 对方身份</label>
-              <input
-                className="w-full border rounded px-2 py-1 text-sm"
-                placeholder="e.g. ER doctor"
-                value={speakerRole}
-                onChange={(e) => setSpeakerRole(e.target.value)}
-                disabled={isActive}
-              />
-            </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="block">
+                  <span className="text-sm font-medium text-slate-700">My goal / 我的目标</span>
+                  <input
+                    className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-base"
+                    placeholder={currentScenario.goalPlaceholder}
+                    value={myGoal}
+                    onChange={(e) => setMyGoal(e.target.value)}
+                    disabled={isActive}
+                  />
+                </label>
 
-            <div className="md:col-span-2">
-              <label className="inline-flex items-center gap-2 text-sm">
+                <label className="block">
+                  <span className="text-sm font-medium text-slate-700">My tone / 我的语气</span>
+                  <input
+                    className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-base"
+                    value={myTone}
+                    onChange={(e) => setMyTone(e.target.value)}
+                    disabled={isActive}
+                  />
+                </label>
+              </div>
+
+              <label className="block">
+                <span className="text-sm font-medium text-slate-700">Other person / 对方身份</span>
                 <input
-                  type="checkbox"
-                  checked={speakerMode}
-                  onChange={(e) => setSpeakerMode(e.target.checked)}
+                  className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-base"
+                  placeholder={currentScenario.rolePlaceholder}
+                  value={speakerRole}
+                  onChange={(e) => setSpeakerRole(e.target.value)}
                   disabled={isActive}
                 />
-                Speakerphone Mode (Echo Shield) 扬声器模式（防回声）
               </label>
-            </div>
-          </div>
-        </details>
-      </div>
 
-      <div>
-        <label className="block text-sm mb-1 font-medium">GUIDE / Background 背景说明</label>
+              <details className="rounded border border-slate-200 bg-slate-50 p-3">
+                <summary className="cursor-pointer text-sm font-medium text-slate-700">
+                  Import guide and settings / 导入背景与设置
+                </summary>
+                <div className="mt-3 space-y-4 border-t border-slate-200 pt-3">
+                  <div>
+                    <input
+                      type="file"
+                      accept=".txt,.md,.rtf,.text"
+                      className="text-sm"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
 
-        {/* 文件上传控件 */}
-        <div className="mb-2">
-          <input
-            type="file"
-            accept=".txt,.md,.rtf,.text"
-            className="text-sm"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                          let raw = String(event.target?.result || "");
 
-              const reader = new FileReader();
-              reader.onload = (event) => {
-                let raw = String(event.target?.result || "");
+                          // 统一换行符
+                          raw = raw.replace(/\r\n/g, "\n");
+                          // 去掉 BOM
+                          raw = raw.replace(/^\uFEFF/, "");
 
-                // 统一换行符
-                raw = raw.replace(/\r\n/g, "\n");
-                // 去掉 BOM
-                raw = raw.replace(/^\uFEFF/, "");
+                          // 按空行分段
+                          const parts = raw.split(/\n\s*\n/);
+                          let cleaned: string;
+                          if (parts.length > 1) {
+                            // 跳过第一段（标题），使用后面的正文
+                            cleaned = parts.slice(1).join("\n\n").trimStart();
+                          } else {
+                            // 没有空行，退化为原来的行为
+                            cleaned = raw.trimStart();
+                          }
 
-                // 按空行分段
-                const parts = raw.split(/\n\s*\n/);
-                let cleaned: string;
-                if (parts.length > 1) {
-                  // 跳过第一段（标题），使用后面的正文
-                  cleaned = parts.slice(1).join("\n\n").trimStart();
-                } else {
-                  // 没有空行，退化为原来的行为
-                  cleaned = raw.trimStart();
-                }
+                          setBackground(cleaned);
+                        };
+                        reader.onerror = () => {
+                          alert("文件读取失败，请重试。");
+                        };
+                        reader.readAsText(file, "utf-8");
 
-                setBackground(cleaned);
-              };
-              reader.onerror = () => {
-                alert("文件读取失败，请重试。");
-              };
-              reader.readAsText(file, "utf-8");
+                        // 清空 input，允许重复上传同一文件
+                        e.target.value = "";
+                      }}
+                      disabled={isActive}
+                    />
+                  </div>
 
-              // 清空 input，允许重复上传同一文件
-              e.target.value = "";
-            }}
-            disabled={isActive}
-          />
-          <p className="text-xs text-gray-500 mt-1">
-            可选择本地 .txt/.md/.rtf 文件导入病情/背景说明
+                  <MicSelector
+                    onSelected={(id) => {
+                      console.log("Preferred mic deviceId:", id);
+                    }}
+                  />
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="font-medium text-slate-700">Underlying mode</span>
+                      <select
+                        className="mt-1 w-full rounded border border-slate-300 px-2 py-2"
+                        value={mode}
+                        onChange={(e) => setMode(e.target.value)}
+                        disabled={isActive}
+                      >
+                        <option value="face-to-face">Face to Face</option>
+                        <option value="interview-meeting">Interview/Meeting</option>
+                        <option value="call-out">Call Out (future)</option>
+                        <option value="call-in">Call In (future)</option>
+                        <option value="notes">Notes (Silent Transcript)</option>
+                      </select>
+                    </label>
+
+                    <label className="block text-sm">
+                      <span className="font-medium text-slate-700">My name / identity</span>
+                      <input
+                        className="mt-1 w-full rounded border border-slate-300 px-2 py-2"
+                        placeholder="e.g. Lucy"
+                        value={myName}
+                        onChange={(e) => setMyName(e.target.value)}
+                        disabled={isActive || autoNameFromGuide}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid gap-2 text-sm text-slate-700">
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={autoNameFromGuide}
+                        onChange={(e) => setAutoNameFromGuide(e.target.checked)}
+                        disabled={isActive}
+                      />
+                      Auto-detect my name from guide
+                    </label>
+
+                    {mode !== "notes" && (
+                      <label className="inline-flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={voiceOutputMode === "AGENT"}
+                          onChange={(e) => setVoiceOutputMode(e.target.checked ? "AGENT" : "LIVE")}
+                          disabled={isActive}
+                        />
+                        Voice output mode: {voiceOutputMode === "AGENT" ? "AI speaks" : "manual only"}
+                      </label>
+                    )}
+
+                    {mode !== "notes" && voiceOutputMode === "LIVE" && (
+                      <label className="inline-flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={autoSuggestEnabled}
+                          onChange={(e) => setAutoSuggestEnabled(e.target.checked)}
+                          disabled={isActive}
+                        />
+                        Auto-generate suggestions after the other person speaks
+                      </label>
+                    )}
+
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={speakerMode}
+                        onChange={(e) => setSpeakerMode(e.target.checked)}
+                        disabled={isActive}
+                      />
+                      Speakerphone echo shield
+                    </label>
+                  </div>
+                </div>
+              </details>
+        </div>
+      </details>
+
+      <section className="space-y-3">
+        <article className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h3 className="text-lg font-semibold text-slate-950">
+            Chinese Meaning / 中文理解
+          </h3>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            Only updates when target is Other person / 只在分析对象为对方时更新
           </p>
-        </div>
+          <div className="mt-3 min-h-24 rounded-lg border border-amber-200 bg-amber-50 p-4">
+            {latestOriginal || latestMeaning ? (
+              <div className="space-y-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Original / 原文
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap text-lg leading-7 text-slate-950">
+                    {latestOriginal}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-amber-700">
+                    Chinese meaning / 中文理解
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap text-lg leading-7 text-slate-900">
+                    {latestMeaning}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm leading-6 text-slate-600">
+                对方说完一句后，这里会先显示英文原文，再显示中文理解。
+              </div>
+            )}
+          </div>
+        </article>
 
-        <textarea
-          className="w-full border rounded px-2 py-2 h-32"
-          placeholder="在这里简要写明病情或背景，AI 会按照这里的内容来回答。也可以上方导入 .txt 文件。 / Briefly describe the situation here, or import a .txt file above."
-          value={background}
-          onChange={(e) => setBackground(e.target.value)}
-          disabled={isActive}
-        />
-      </div>
-
-      {/* 🪄 Suggested Line Section */}
-      <div className="border rounded p-3 bg-gradient-to-r from-purple-50 to-blue-50">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-purple-800">🪄 Quick Response Assistant</h3>
-          <button
-            className="px-4 py-2 rounded text-sm bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-            onClick={generateSuggestedLine}
-            disabled={isGeneratingLine}
-          >
-            {isGeneratingLine ? "⏳ Generating..." : "🪄 Suggested line"}
-          </button>
-        </div>
-
-        {/* Draft Box - Multiple suggestions */}
-        {pendingLines.length > 0 && (
-          <div className="mt-3 p-3 bg-white border-2 border-purple-300 rounded-lg">
-            <div className="flex items-start justify-between mb-2">
-              <span className="text-xs font-semibold text-purple-700 uppercase">
-                Draft Options ({pendingLines.length})
-              </span>
-              <div className="flex gap-2">
+        <article className="rounded-lg border-2 border-blue-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h3 className="text-xl font-semibold text-blue-950">
+                Suggested English / 我可以说
+              </h3>
+              <p className="mt-1 max-w-2xl text-sm leading-5 text-slate-500">
+                Paused while target is Me. Previous suggestion stays visible.
+                当分析对象是我时暂停更新，上一条建议会保留。
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {suggestedOptions.length > 1 && (
                 <button
-                  className="px-2 py-1 rounded text-xs bg-green-500 text-white hover:bg-green-600 font-medium"
+                  className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
                   onClick={copyAllLines}
-                  title="Copy all options"
                 >
-                  📋 Copy all
+                  Copy all
                 </button>
+              )}
+              {pendingLines.length > 0 && (
                 <button
-                  className="px-2 py-1 rounded text-xs bg-gray-500 text-white hover:bg-gray-600 font-medium"
+                  className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
                   onClick={clearPendingLines}
-                  title="Clear all drafts"
                 >
-                  ✕ Clear
+                  Clear
                 </button>
-              </div>
+              )}
+              <button
+                className="rounded bg-blue-700 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={generateSuggestedLine}
+                disabled={isGeneratingLine}
+              >
+                {isGeneratingLine ? "Generating..." : "Regenerate"}
+              </button>
             </div>
-            <div className="space-y-2">
-              {pendingLines.map((line, idx) => (
-                <div
-                  key={idx}
-                  className="p-2 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded cursor-pointer transition-colors"
-                  onClick={() => copySingleLine(line)}
-                  title="Click to copy this line"
+          </div>
+
+          <div className="mt-4 space-y-3">
+            {suggestedOptions.length ? (
+              suggestedOptions.map((line, idx) => (
+                <div key={`${line}-${idx}`} className="rounded-lg border border-blue-100 bg-blue-50 p-4">
+                  <div className="whitespace-pre-wrap text-2xl leading-9 text-slate-950">
+                    {line}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+                      onClick={() => copySingleLine(line)}
+                    >
+                      Copy
+                    </button>
+                    <button
+                      className="rounded border border-blue-300 bg-white px-3 py-1.5 text-sm font-medium text-blue-800 hover:bg-blue-100"
+                      onClick={() => speakSuggestedLine(line)}
+                    >
+                      Speak this line
+                    </button>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="rounded-lg border border-dashed border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-slate-600">
+                Suggestions will appear here after the other person speaks.
+              </div>
+            )}
+          </div>
+
+          <ManualInputBox onSend={handleManualSend} />
+        </article>
+
+        <article className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-lg font-semibold text-slate-950">
+              Recent context / 最近上下文
+            </h3>
+            <span className={`rounded-full px-3 py-1 text-xs font-medium ${
+              isActive ? "bg-green-100 text-green-800" : "bg-slate-100 text-slate-600"
+            }`}>
+              {isActive ? "Listening" : "Paused"}
+            </span>
+          </div>
+          <p className="mt-1 text-sm leading-5 text-slate-500">
+            {activeSpeaker === "partner"
+              ? "Recording the other person. Suggestions will update."
+              : "Recording you as Me. Chinese Meaning and Suggested English are paused."}
+          </p>
+
+          {liveCaption && (
+            <div className="mt-2 rounded border border-blue-200 bg-blue-50 p-2.5">
+              <div className="text-xs font-semibold uppercase text-blue-700">
+                Hearing now
+              </div>
+              <div className="mt-1 text-sm leading-6 text-slate-800">{liveCaption}</div>
+            </div>
+          )}
+
+          <div className="mt-2 space-y-2">
+            {transcriptMessages.length ? (
+              transcriptMessages.map((msg) => (
+                <div key={msg.id} className="rounded border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    {msg.speaker === "me" || msg.isManual ? "Me" : "Other person"}
+                  </div>
+                  <div className="mt-0.5 whitespace-pre-wrap text-sm leading-5 text-slate-900">
+                    {msg.contentEN}
+                  </div>
+                  <div className="mt-0.5 whitespace-pre-wrap text-xs leading-5 text-slate-600">
+                    {msg.contentZH}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="rounded border border-dashed border-slate-300 px-3 py-2 text-sm text-slate-500">
+                Recent bilingual context will appear here.
+              </div>
+            )}
+          </div>
+        </article>
+      </section>
+
+      <details className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-700">
+          Session log and export / 对话记录与导出
+        </summary>
+        <div className="mt-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-medium">Conversation record</h3>
+            <div className="flex flex-wrap gap-2">
+              {mode === "notes" && (
+                <button
+                  className="rounded bg-yellow-600 px-3 py-1 text-sm text-white hover:bg-yellow-700"
+                  onClick={() => maybeInsertTimestamp(true)}
                 >
-                  <div className="flex items-start gap-2">
-                    <span className="text-purple-600 font-semibold flex-shrink-0">•</span>
-                    <span className="text-gray-800 leading-relaxed flex-1">{line}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div className="mt-2 text-xs text-gray-500 italic">
-              💡 Click any line to copy it to clipboard
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Live Caption Display (Zoom-like interim results) */}
-      {liveCaption && (
-        <div className="border-2 border-blue-400 rounded p-3 bg-blue-50 mb-4">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-xs font-semibold text-blue-700 uppercase">🎤 Live Caption</span>
-            <span className="text-xs text-gray-500 italic">(speaking...)</span>
-          </div>
-          <div className="text-gray-800 leading-relaxed">
-            {liveCaption}
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm font-medium">对话记录 Conversation</h3>
-        <div className="flex gap-2">
-          {/* 任务 2：手动插入时间戳按钮（仅 Notes 模式） */}
-          {mode === "notes" && (
-            <button
-              className="px-3 py-1 rounded text-sm bg-yellow-500 text-white hover:bg-yellow-600"
-              onClick={() => maybeInsertTimestamp(true)}
-            >
-              🕒 Insert Timestamp
-            </button>
-          )}
-          <button
-            className="px-3 py-1 rounded text-sm bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={exportConversation}
-            disabled={conversation.length === 0}
-          >
-            导出为文本 Export .txt
-          </button>
-          {mode === "notes" && (
-            <button
-              className="px-3 py-1 rounded text-sm bg-green-500 text-white hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
-              onClick={exportConversationMarkdown}
-              disabled={conversation.length === 0}
-            >
-              导出 Markdown Export .md
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="border rounded p-3 bg-white">
-        {conversation.map((msg, idx) => {
-          // 时间戳消息特殊处理
-          if (isTimestampLine(msg.contentEN)) {
-            // 任务 1：提取并优化时间戳显示
-            const timeStr = extractHHMM(msg.contentEN);
-            return (
-              <div key={msg.id || idx} className="my-4 text-center">
-                <div className="inline-block px-4 py-1 bg-gray-200 text-gray-700 rounded-full text-sm font-medium">
-                  🕒 {timeStr || msg.contentEN}
-                </div>
-              </div>
-            );
-          }
-
-          const isUser = msg.role === "user";
-          const isAI = msg.role === "assistant";
-          const isChinese = hasChinese(msg.contentZH);
-          const isLiveMode = voiceOutputMode === "LIVE";
-          const isNotesMode = mode === "notes";
-
-          // Determine display order: original first, then translation
-          let firstLang: string, firstContent: string;
-          let secondLang: string, secondContent: string;
-
-          if (isAI) {
-            // AI messages: always EN first, then ZH
-            firstLang = "EN";
-            firstContent = msg.contentEN;
-            secondLang = "ZH";
-            secondContent = msg.contentZH;
-          } else {
-            // User messages: original language first
-            if (isChinese) {
-              firstLang = "ZH";
-              firstContent = msg.contentZH;
-              secondLang = "EN";
-              secondContent = msg.contentEN;
-            } else {
-              firstLang = "EN";
-              firstContent = msg.contentEN;
-              secondLang = "ZH";
-              secondContent = msg.contentZH;
-            }
-          }
-
-          // Notes 模式：添加 📝 图标
-          const roleLabel = isNotesMode && isUser
-            ? (msg.isManual ? `📝 ${myName || "You"} (manual)` : "📝 Transcript")
-            : isUser
-            ? (msg.isManual ? `🧑 ${myName || "You"} (manual)` : "🧑 Partner")
-            : (isLiveMode ? "💡 Suggested Reply" : "🤖 AI");
-
-          return (
-            <div key={msg.id || idx} className="mb-3 leading-7">
-              {isAI && isLiveMode ? (
-                // Live 模式：简洁显示，像 notes
-                <>
-                  <div className="font-medium text-blue-700 mb-1">
-                    {roleLabel}:
-                  </div>
-                  <div className="whitespace-pre-wrap pl-4 border-l-2 border-blue-300 text-gray-800">
-                    {firstContent}
-                  </div>
-                  {/* 中文折叠显示（可选） */}
-                  <details className="mt-2 pl-4 text-sm">
-                    <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
-                      Show Chinese 显示中文
-                    </summary>
-                    <div className="whitespace-pre-wrap text-gray-600 mt-1">
-                      {secondContent}
-                    </div>
-                  </details>
-                </>
-              ) : isNotesMode && isUser ? (
-                // Notes 模式：简洁双语显示
-                <>
-                  <div className="whitespace-pre-wrap">
-                    {roleLabel} ({firstLang}): {firstContent}
-                  </div>
-                  <div className="whitespace-pre-wrap text-gray-600">
-                    {roleLabel} ({secondLang}): {secondContent}
-                  </div>
-                </>
-              ) : (
-                // Agent 模式或其他：保持现有样式
-                <>
-                  <div className="whitespace-pre-wrap">
-                    {roleLabel} ({firstLang}): {firstContent}
-                  </div>
-                  <div className="whitespace-pre-wrap text-gray-600">
-                    {roleLabel} ({secondLang}): {secondContent}
-                  </div>
-                </>
+                  Insert Timestamp
+                </button>
+              )}
+              <button
+                className="rounded bg-blue-600 px-3 py-1 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+                onClick={exportConversation}
+                disabled={conversation.length === 0}
+              >
+                Export .txt
+              </button>
+              {mode === "notes" && (
+                <button
+                  className="rounded bg-green-600 px-3 py-1 text-sm text-white hover:bg-green-700 disabled:opacity-50"
+                  onClick={exportConversationMarkdown}
+                  disabled={conversation.length === 0}
+                >
+                  Export .md
+                </button>
               )}
             </div>
-          );
-        })}
-      </div>
+          </div>
 
-      <ManualInputBox onSend={handleManualSend} />
+          <div className="rounded border border-slate-200 bg-slate-50 p-3">
+            {conversation.length ? (
+              conversation.map((msg, idx) => {
+                if (isTimestampLine(msg.contentEN)) {
+                  const timeStr = extractHHMM(msg.contentEN);
+                  return (
+                    <div key={msg.id || idx} className="my-4 text-center">
+                      <div className="inline-block rounded-full bg-slate-200 px-4 py-1 text-sm font-medium text-slate-700">
+                        {timeStr || msg.contentEN}
+                      </div>
+                    </div>
+                  );
+                }
+
+                const isUser = msg.role === "user";
+                const roleLabel = isUser
+                  ? msg.isManual
+                    ? `${myName || "Me"} (manual)`
+                    : msg.speaker === "me"
+                    ? "Me"
+                    : "Other person"
+                  : "Suggested English";
+
+                return (
+                  <div key={msg.id || idx} className="mb-3 rounded bg-white p-3 text-sm leading-6">
+                    <div className="font-semibold text-slate-700">{roleLabel}</div>
+                    <div className="mt-1 whitespace-pre-wrap text-slate-900">{msg.contentEN}</div>
+                    {msg.contentZH && msg.contentZH !== msg.contentEN && (
+                      <div className="mt-1 whitespace-pre-wrap text-slate-600">{msg.contentZH}</div>
+                    )}
+                  </div>
+                );
+              })
+            ) : (
+              <div className="text-sm text-slate-500">No conversation yet.</div>
+            )}
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

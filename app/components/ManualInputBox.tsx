@@ -10,7 +10,7 @@ function ManualInputBox({ onSend }: Props) {
   const handleSend = () => {
     if (!manualInput.trim()) return;
 
-    // 通知上层组件处理（生成英文 + 播报）
+    // 通知上层组件处理（生成英文建议）
     onSend?.(manualInput);
 
     // 清空输入框
@@ -31,15 +31,15 @@ function ManualInputBox({ onSend }: Props) {
   };
 
   return (
-    <div className="mt-4 border-t pt-4">
-      <label className="block font-medium mb-1">人工输入（可覆盖 AI 回答）</label>
+    <div className="mt-4 border-t border-blue-100 pt-4">
+      <label className="block font-medium mb-1">Add a note / 手动补充</label>
       <p className="text-xs text-gray-500 mb-2">
-        EN: Manual input to override or supplement the AI's reply.
+        Add what you want to express, then the copilot will turn it into natural English.
       </p>
       <div className="flex gap-2">
         <textarea
           className="border rounded p-2 flex-1 resize-y min-h-[2.5rem]"
-          placeholder="你想让助手说什么？ / What do you want the assistant to say?"
+          placeholder="例如：我想确认下一步时间 / e.g. I want to confirm the next step"
           value={manualInput}
           onChange={(e) => setManualInput(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -50,7 +50,7 @@ function ManualInputBox({ onSend }: Props) {
           onClick={handleSend}
           className="px-4 py-2 bg-blue-600 text-white rounded"
         >
-          发送
+          Generate
         </button>
       </div>
     </div>
