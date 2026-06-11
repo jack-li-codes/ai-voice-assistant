@@ -13,14 +13,6 @@ export default function Home() {
           <h1 className="mt-1 text-xl font-bold text-slate-950 md:text-2xl">
             External brain for English conversations
           </h1>
-          <p className="mt-2 max-w-4xl text-sm leading-5 text-slate-700">
-            AI helps you understand and suggests what you can say. You stay in
-            control. AI does not speak automatically.
-          </p>
-          <p className="mt-1 max-w-4xl text-sm leading-5 text-slate-600">
-            中文说明：实时听对方说话，显示字幕，帮你用中文理解意思，
-            并给出自然英文提词。默认不会自动替你说话。
-          </p>
         </div>
 
         <LiveConversation />
